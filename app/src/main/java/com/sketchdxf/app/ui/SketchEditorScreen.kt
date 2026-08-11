@@ -117,13 +117,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
 
-    // CAD-style line input: tap a start point, tap again for direction (snapped to the
-    // nearest axis when Ortho is on), then type the exact length — no dragging to "eyeball" it.
+    // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
+    // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
+    // Typing an exact length afterward is optional; skipping it just keeps the line as tapped.
     var orthoOn by remember { mutableStateOf(true) }
     var snapOn by remember { mutableStateOf(true) }
     var chainOn by remember { mutableStateOf(true) }
     var lineStartPoint by remember { mutableStateOf<Offset?>(null) }
-    var pendingLineDirection by remember { mutableStateOf<Pair<Offset, Double>?>(null) }
+    var pendingLengthIndex by remember { mutableStateOf(-1) }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
     fun trySnapPoint(p: Offset): Offset {
@@ -140,17 +141,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return best
     }
 
-    /** Forces the angle to the nearest of 0/90/180/270 degrees, like AutoCAD's Ortho mode. */
-    fun snapToOrtho(angle: Double): Double {
-        val deg = ((Math.toDegrees(angle) % 360) + 360) % 360
-        return Math.toRadians(
-            when {
-                deg < 45 || deg >= 315 -> 0.0
-                deg < 135 -> 90.0
-                deg < 225 -> 180.0
-                else -> 270.0
-            }
-        )
+    /** Locks [raw] onto the horizontal or vertical line through [start], whichever is closer —
+     *  the end point keeps its tapped distance along that axis, like AutoCAD's Ortho mode. */
+    fun orthoProject(start: Offset, raw: Offset): Offset {
+        val dx = raw.x - start.x; val dy = raw.y - start.y
+        return if (abs(dx) >= abs(dy)) Offset(raw.x, start.y) else Offset(start.x, raw.y)
     }
 
     /** Pixels per real-world mm, derived from confirmed lines so far (or a sensible default). */
@@ -344,19 +339,25 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { showRoomPlan = false }
         )
     }
-    pendingLineDirection?.let { (start, angle) ->
-        LineLengthDialog(
-            onConfirm = { mm ->
-                val lengthPx = mm.toFloat() * currentPxPerMm()
-                val end = Offset(
-                    start.x + kotlin.math.cos(angle).toFloat() * lengthPx,
-                    start.y + kotlin.math.sin(angle).toFloat() * lengthPx
-                )
-                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, realLength = mm, confirmed = true))
-                pendingLineDirection = null
-                lineStartPoint = if (chainOn) end else null
+    if (pendingLengthIndex in shapes.indices) {
+        val drawn = shapes[pendingLengthIndex]
+        val asDrawnMm = hypotF(drawn.x2 - drawn.x1, drawn.y2 - drawn.y1) / currentPxPerMm()
+        OptionalLineLengthDialog(
+            asDrawnMm = asDrawnMm,
+            onSetExact = { mm ->
+                val cur = shapes[pendingLengthIndex]
+                val curLenPx = hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
+                if (curLenPx > 1e-3f) {
+                    val f = (mm.toFloat() * currentPxPerMm()) / curLenPx
+                    shapes[pendingLengthIndex] = cur.copy(
+                        x2 = cur.x1 + (cur.x2 - cur.x1) * f,
+                        y2 = cur.y1 + (cur.y2 - cur.y1) * f,
+                        realLength = mm, confirmed = true
+                    )
+                }
+                pendingLengthIndex = -1
             },
-            onCancel = { pendingLineDirection = null; lineStartPoint = null }
+            onUseAsDrawn = { pendingLengthIndex = -1 }
         )
     }
 
@@ -381,17 +382,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 FilterChip(selected = tool == Tool.SELECT, onClick = {
-                    tool = Tool.SELECT; lineStartPoint = null; pendingLineDirection = null
+                    tool = Tool.SELECT; lineStartPoint = null
                 }, label = { Icon(Icons.Filled.NearMe, "Select") })
                 FilterChip(selected = tool == Tool.LINE, onClick = {
-                    if (tool == Tool.LINE) { lineStartPoint = null; pendingLineDirection = null } // tap again = cancel/reset
+                    if (tool == Tool.LINE) lineStartPoint = null // tap again = cancel/reset
                     tool = Tool.LINE
                 }, label = { Icon(Icons.Filled.ShowChart, "Line") })
                 FilterChip(selected = tool == Tool.CIRCLE, onClick = {
-                    tool = Tool.CIRCLE; lineStartPoint = null; pendingLineDirection = null
+                    tool = Tool.CIRCLE; lineStartPoint = null
                 }, label = { Icon(Icons.Filled.Circle, "Circle") })
                 FilterChip(selected = tool == Tool.TEXT, onClick = {
-                    tool = Tool.TEXT; lineStartPoint = null; pendingLineDirection = null
+                    tool = Tool.TEXT; lineStartPoint = null
                 }, label = { Icon(Icons.Filled.TextFields, "Text") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
@@ -407,7 +408,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 when {
                     tool == Tool.SELECT -> "Tap a line/circle/text to edit its dimension or delete it"
                     tool == Tool.LINE && lineStartPoint == null -> "Tap the line's start point"
-                    tool == Tool.LINE -> "Tap again to set direction, then type the length"
+                    tool == Tool.LINE -> "Tap the end point — length is automatic, or type an exact one after"
                     tool == Tool.CIRCLE -> "Drag from the centre outward to draw a circle"
                     else -> "Tap where you want a text label"
                 },
@@ -444,10 +445,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 if (start == null) {
                                     lineStartPoint = trySnapPoint(p)
                                 } else {
-                                    val snappedP = trySnapPoint(p)
-                                    val rawAngle = kotlin.math.atan2((snappedP.y - start.y).toDouble(), (snappedP.x - start.x).toDouble())
-                                    val angle = if (orthoOn) snapToOrtho(rawAngle) else rawAngle
-                                    pendingLineDirection = start to angle
+                                    val snapped = trySnapPoint(p)
+                                    val end = if (orthoOn) orthoProject(start, snapped) else snapped
+                                    if (hypotF(end.x - start.x, end.y - start.y) > 4f) {
+                                        shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false))
+                                        pendingLengthIndex = shapes.lastIndex
+                                        lineStartPoint = if (chainOn) end else null
+                                    }
                                 }
                             })
                             Tool.TEXT -> detectTapGestures(onTap = { p -> pendingTextPos = p })
@@ -499,9 +503,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
 }
 
-/** Direction is already set (from the two-tap gesture); this just asks for the exact length. */
+/**
+ * The line is already drawn from tap to tap; this optionally overrides its length with an
+ * exact typed value (same direction, endpoint adjusted). Skipping just keeps it as drawn.
+ */
 @Composable
-private fun LineLengthDialog(onConfirm: (mm: Double) -> Unit, onCancel: () -> Unit) {
+private fun OptionalLineLengthDialog(asDrawnMm: Float, onSetExact: (mm: Double) -> Unit, onUseAsDrawn: () -> Unit) {
     var text by remember { mutableStateOf("") }
     var showHandwrite by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -509,15 +516,19 @@ private fun LineLengthDialog(onConfirm: (mm: Double) -> Unit, onCancel: () -> Un
         HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
     AlertDialog(
-        onDismissRequest = onCancel,
+        onDismissRequest = onUseAsDrawn,
         title = { Text("Line length") },
         text = {
             Column {
+                Text(
+                    "As drawn: ~${trimNum(asDrawnMm.toDouble())}mm. Type an exact length to override it, or use it as drawn.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
                 OutlinedTextField(
                     value = text, onValueChange = { text = it; error = null }, singleLine = true,
-                    label = { Text("Length (mm)") },
+                    label = { Text("Exact length (mm) — optional") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -526,10 +537,10 @@ private fun LineLengthDialog(onConfirm: (mm: Double) -> Unit, onCancel: () -> Un
         confirmButton = {
             TextButton(onClick = {
                 val v = text.toDoubleOrNull()
-                if (v != null && v > 0) onConfirm(v) else error = "Enter a valid length"
-            }) { Text("Draw") }
+                if (v != null && v > 0) onSetExact(v) else error = "Enter a valid length"
+            }) { Text("Set exact") }
         },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+        dismissButton = { TextButton(onClick = onUseAsDrawn) { Text("Use as drawn") } }
     )
 }
 
