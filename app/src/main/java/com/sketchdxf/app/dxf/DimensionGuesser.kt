@@ -26,14 +26,15 @@ object DimensionGuesser {
         )
         if (rect.width() <= 0 || rect.height() <= 0) return ""
         val crop = Bitmap.createBitmap(bitmap, rect.left, rect.top, rect.width(), rect.height())
-        val tmp = File(context.cacheDir, "dimguess_${System.nanoTime()}.jpg")
-        return try {
+        // Must live under cacheDir/shared/ — that's the only cache root file_paths.xml declares
+        // for FileProvider; a file elsewhere in cacheDir makes getUriForFile throw.
+        val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+        val tmp = File(dir, "dimguess_${System.nanoTime()}.jpg")
+        return runCatching {
             FileOutputStream(tmp).use { crop.compress(Bitmap.CompressFormat.JPEG, 90, it) }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", tmp)
             val text = TextOcr.singleLine(context, uri)
             Regex("""\d+(\.\d+)?""").find(text)?.value ?: ""
-        } finally {
-            tmp.delete()
-        }
+        }.getOrDefault("").also { tmp.delete() }
     }
 }
