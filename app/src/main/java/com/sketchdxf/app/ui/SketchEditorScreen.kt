@@ -382,8 +382,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     shapes.forEach { s ->
                         when (s.kind) {
                             ShapeKind.LINE -> {
-                                val color = if (s.confirmed) Color(0xFF2E7D32) else linePaint
-                                drawLine(color, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = 5f)
+                                val lineColor = if (s.confirmed) Color(0xFF2E7D32) else linePaint
+                                drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = 5f)
                                 if (s.confirmed && s.realLength > 0) {
                                     val mx = (s.x1 + s.x2) / 2f; val my = (s.y1 + s.y2) / 2f
                                     drawContext.canvas.nativeCanvas.drawText(
