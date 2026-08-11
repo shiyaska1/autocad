@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -64,7 +65,7 @@ private data class PickedFile(val uri: Uri, val displayName: String, val isPdf: 
  * Front page: name the work, pick photo(s)/PDF(s) of the sketch, then "Make DXF" runs
  * auto line-detection (best-effort) and opens the editor to review/confirm/correct it.
  */
-@OptIn(ExperimentalComposeUiApi::class)
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: () -> Unit) {
     val context = LocalContext.current
