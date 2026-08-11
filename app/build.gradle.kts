@@ -117,8 +117,6 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
-    // On-device text recognition — reads a printed/typed dimension near a detected line (offline).
-    implementation("com.google.mlkit:text-recognition:16.0.1")
     // On-device handwriting recognition — for typing dimensions/labels by hand on the canvas.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
 

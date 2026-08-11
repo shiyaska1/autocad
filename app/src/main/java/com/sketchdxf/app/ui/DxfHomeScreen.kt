@@ -44,15 +44,10 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.sketchdxf.app.data.ShapeKind
-import com.sketchdxf.app.data.SketchShape
-import com.sketchdxf.app.data.SketchSource
 import com.sketchdxf.app.dxf.BitmapUtil
-import com.sketchdxf.app.dxf.DimensionGuesser
 import com.sketchdxf.app.dxf.PdfPageRenderer
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.SketchAttachmentStore
-import com.sketchdxf.app.dxf.SketchLineDetector
 import com.sketchdxf.app.ocr.rememberImageCamera
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -62,8 +57,11 @@ import java.io.FileOutputStream
 private data class PickedFile(val uri: Uri, val displayName: String, val isPdf: Boolean)
 
 /**
- * Front page: name the work, pick photo(s)/PDF(s) of the sketch, then "Make DXF" runs
- * auto line-detection (best-effort) and opens the editor to review/confirm/correct it.
+ * Front page: name the work and pick photo(s)/PDF(s) of the sketch. There is no automatic
+ * line-detection — that turned out unreliable enough on real pencil sketches to crash and
+ * mislead more than it helped. Instead the first picked file opens as a background layer in
+ * the editor, and every line/circle/text on top of it is drawn (and dimensioned) by hand with
+ * the CAD-style tools there (ortho, snap, direction + typed length).
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -90,7 +88,7 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
         uris.forEach { addUri(it) }
     }
 
-    fun makeDxf() {
+    fun openInEditor() {
         if (name.isBlank()) { error = "Give this drawing a name first"; return }
         if (picked.isEmpty()) { error = "Add at least one photo or PDF of your sketch"; return }
         error = null
@@ -100,40 +98,26 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
                 // Copy every picked file into app storage as a source attachment.
                 val sources = picked.mapNotNull { SketchAttachmentStore.copyIn(context, it.uri) }
 
-                // The first picked file is the primary sketch used for line detection; a PDF's
-                // first page is rasterized for that purpose (the original PDF is still kept as
-                // a source attachment above).
+                // The first picked file becomes the background layer to trace over; a PDF's
+                // first page is rasterized for that (the original PDF stays a source attachment).
                 val first = picked.first()
-                val primaryBitmap: Bitmap? = if (first.isPdf) {
+                val bitmap: Bitmap? = if (first.isPdf) {
                     PdfPageRenderer.renderPages(context, first.uri, targetWidth = 1600).firstOrNull()
                 } else {
                     sources.firstOrNull { !it.mime.contains("pdf") }?.let { BitmapUtil.decodeOriented(it.path) }
                 }
+                if (bitmap == null) return@withContext null
 
-                if (primaryBitmap == null) {
-                    return@withContext null
-                }
-
-                val (workingBitmap, lines) = SketchLineDetector.detect(primaryBitmap)
                 val baseFile = SketchAttachmentStore.newFile(context, "base", "png")
-                FileOutputStream(baseFile).use { workingBitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-
-                val shapes = lines.map { line ->
-                    val guess = DimensionGuesser.guess(context, workingBitmap, line).toDoubleOrNull() ?: 0.0
-                    SketchShape(
-                        workId = 0, kind = ShapeKind.LINE,
-                        x1 = line.x1, y1 = line.y1, x2 = line.x2, y2 = line.y2,
-                        realLength = guess, confirmed = false
-                    )
-                }
-                Triple(baseFile.absolutePath, shapes, sources)
+                FileOutputStream(baseFile).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                baseFile.absolutePath to sources
             }
             busy = false
             if (result == null) {
                 error = "Couldn't read that file — try another photo"
             } else {
-                val (basePath, shapes, sources) = result
-                PendingSketchEditor.set(workId = 0, createdAt = 0, name = name.trim(), baseImagePath = basePath, shapes = shapes, sources = sources)
+                val (basePath, sources) = result
+                PendingSketchEditor.set(workId = 0, createdAt = 0, name = name.trim(), baseImagePath = basePath, shapes = emptyList(), sources = sources)
                 onGoToEditor()
             }
         }
@@ -163,7 +147,7 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
                 )
 
                 Text(
-                    "Photo(s) or PDF of your pen sketch, with dimensions written on it",
+                    "Photo(s) or PDF of your pen sketch — the first one becomes the background you trace over",
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier.padding(top = 16.dp, bottom = 6.dp)
                 )
@@ -211,8 +195,8 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
 
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp)) }
 
-                Button(onClick = { makeDxf() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (busy) "Converting…" else "Make DXF")
+                Button(onClick = { openInEditor() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (busy) "Opening…" else "Open in editor")
                 }
                 OutlinedButton(onClick = onBlankCanvas, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                     Icon(Icons.Filled.Draw, null, Modifier.padding(end = 6.dp))
@@ -223,7 +207,7 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
-                        Text("Detecting lines…", modifier = Modifier.padding(top = 12.dp))
+                        Text("Opening…", modifier = Modifier.padding(top = 12.dp))
                     }
                 }
             }

@@ -75,9 +75,10 @@ private fun hypotF(x: Float, y: Float): Float = hypot(x.toDouble(), y.toDouble()
 private enum class Tool { SELECT, LINE, CIRCLE, TEXT }
 
 /**
- * Shared editor for both flows: reviewing/correcting auto-detected lines over a photo, and
- * drawing a sketch from scratch (baseImagePath == null). Coordinates are this composable's own
- * canvas-pixel space — consistent within one work on one device, which is all that's needed.
+ * Shared editor for both flows: tracing lines by hand over a background photo, and drawing a
+ * sketch from scratch (baseImagePath == null) — nothing is auto-detected. Coordinates are this
+ * composable's own canvas-pixel space — consistent within one work on one device, which is all
+ * that's needed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,6 +116,51 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
+
+    // CAD-style line input: tap a start point, tap again for direction (snapped to the
+    // nearest axis when Ortho is on), then type the exact length — no dragging to "eyeball" it.
+    var orthoOn by remember { mutableStateOf(true) }
+    var snapOn by remember { mutableStateOf(true) }
+    var chainOn by remember { mutableStateOf(true) }
+    var lineStartPoint by remember { mutableStateOf<Offset?>(null) }
+    var pendingLineDirection by remember { mutableStateOf<Pair<Offset, Double>?>(null) }
+
+    /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
+    fun trySnapPoint(p: Offset): Offset {
+        if (!snapOn) return p
+        var best = p; var bestDist = 28f
+        shapes.forEach { s ->
+            if (s.kind == ShapeKind.LINE) {
+                listOf(Offset(s.x1, s.y1), Offset(s.x2, s.y2), Offset((s.x1 + s.x2) / 2f, (s.y1 + s.y2) / 2f)).forEach { c ->
+                    val d = hypotF(p.x - c.x, p.y - c.y)
+                    if (d < bestDist) { bestDist = d; best = c }
+                }
+            }
+        }
+        return best
+    }
+
+    /** Forces the angle to the nearest of 0/90/180/270 degrees, like AutoCAD's Ortho mode. */
+    fun snapToOrtho(angle: Double): Double {
+        val deg = ((Math.toDegrees(angle) % 360) + 360) % 360
+        return Math.toRadians(
+            when {
+                deg < 45 || deg >= 315 -> 0.0
+                deg < 135 -> 90.0
+                deg < 225 -> 180.0
+                else -> 270.0
+            }
+        )
+    }
+
+    /** Pixels per real-world mm, derived from confirmed lines so far (or a sensible default). */
+    fun currentPxPerMm(): Float {
+        val ratios = shapes.filter { it.kind == ShapeKind.LINE && it.confirmed && it.realLength > 0.01 }
+            .map { hypotF(it.x2 - it.x1, it.y2 - it.y1) / it.realLength.toFloat() }
+        if (ratios.isNotEmpty()) return ratios.sorted()[ratios.size / 2]
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
+        return (cw * 0.6f) / 3000f // first-ever line: assume it's roughly a 3 m wall
+    }
 
     val baseBitmap = remember(baseImagePath) {
         baseImagePath?.let { p -> runCatching { BitmapFactory.decodeFile(p)?.asImageBitmap() }.getOrNull() }
@@ -298,6 +344,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { showRoomPlan = false }
         )
     }
+    pendingLineDirection?.let { (start, angle) ->
+        LineLengthDialog(
+            onConfirm = { mm ->
+                val lengthPx = mm.toFloat() * currentPxPerMm()
+                val end = Offset(
+                    start.x + kotlin.math.cos(angle).toFloat() * lengthPx,
+                    start.y + kotlin.math.sin(angle).toFloat() * lengthPx
+                )
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, realLength = mm, confirmed = true))
+                pendingLineDirection = null
+                lineStartPoint = if (chainOn) end else null
+            },
+            onCancel = { pendingLineDirection = null; lineStartPoint = null }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -319,23 +380,36 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(selected = tool == Tool.SELECT, onClick = { tool = Tool.SELECT },
-                    label = { Icon(Icons.Filled.NearMe, "Select") })
-                FilterChip(selected = tool == Tool.LINE, onClick = { tool = Tool.LINE },
-                    label = { Icon(Icons.Filled.ShowChart, "Line") })
-                FilterChip(selected = tool == Tool.CIRCLE, onClick = { tool = Tool.CIRCLE },
-                    label = { Icon(Icons.Filled.Circle, "Circle") })
-                FilterChip(selected = tool == Tool.TEXT, onClick = { tool = Tool.TEXT },
-                    label = { Icon(Icons.Filled.TextFields, "Text") })
+                FilterChip(selected = tool == Tool.SELECT, onClick = {
+                    tool = Tool.SELECT; lineStartPoint = null; pendingLineDirection = null
+                }, label = { Icon(Icons.Filled.NearMe, "Select") })
+                FilterChip(selected = tool == Tool.LINE, onClick = {
+                    if (tool == Tool.LINE) { lineStartPoint = null; pendingLineDirection = null } // tap again = cancel/reset
+                    tool = Tool.LINE
+                }, label = { Icon(Icons.Filled.ShowChart, "Line") })
+                FilterChip(selected = tool == Tool.CIRCLE, onClick = {
+                    tool = Tool.CIRCLE; lineStartPoint = null; pendingLineDirection = null
+                }, label = { Icon(Icons.Filled.Circle, "Circle") })
+                FilterChip(selected = tool == Tool.TEXT, onClick = {
+                    tool = Tool.TEXT; lineStartPoint = null; pendingLineDirection = null
+                }, label = { Icon(Icons.Filled.TextFields, "Text") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
             }
+            if (tool == Tool.LINE) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = orthoOn, onClick = { orthoOn = !orthoOn }, label = { Text("Ortho") })
+                    FilterChip(selected = snapOn, onClick = { snapOn = !snapOn }, label = { Text("Snap") })
+                    FilterChip(selected = chainOn, onClick = { chainOn = !chainOn }, label = { Text("Chain") })
+                }
+            }
             Text(
-                when (tool) {
-                    Tool.SELECT -> "Tap a line/circle/text to edit its dimension or delete it"
-                    Tool.LINE -> "Drag to draw a line, then type its real length"
-                    Tool.CIRCLE -> "Drag from the centre outward to draw a circle"
-                    Tool.TEXT -> "Tap where you want a text label"
+                when {
+                    tool == Tool.SELECT -> "Tap a line/circle/text to edit its dimension or delete it"
+                    tool == Tool.LINE && lineStartPoint == null -> "Tap the line's start point"
+                    tool == Tool.LINE -> "Tap again to set direction, then type the length"
+                    tool == Tool.CIRCLE -> "Drag from the centre outward to draw a circle"
+                    else -> "Tap where you want a text label"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
@@ -351,27 +425,31 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 }
                 Canvas(
-                    Modifier.fillMaxSize().pointerInput(tool) {
+                    Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn) {
                         when (tool) {
-                            Tool.LINE, Tool.CIRCLE -> detectDragGestures(
+                            Tool.CIRCLE -> detectDragGestures(
                                 onDragStart = { p -> dragStart = p; dragCurrent = p },
                                 onDrag = { change, _ -> dragCurrent = change.position },
                                 onDragEnd = {
                                     val s = dragStart; val c = dragCurrent
                                     if (s != null && c != null) {
                                         val len = hypotF(c.x - s.x, c.y - s.y)
-                                        if (len > 12f) {
-                                            if (tool == Tool.LINE) {
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = c.x, y2 = c.y))
-                                                editingIndex = shapes.lastIndex
-                                            } else {
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len))
-                                            }
-                                        }
+                                        if (len > 12f) shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len))
                                     }
                                     dragStart = null; dragCurrent = null
                                 }
                             )
+                            Tool.LINE -> detectTapGestures(onTap = { p ->
+                                val start = lineStartPoint
+                                if (start == null) {
+                                    lineStartPoint = trySnapPoint(p)
+                                } else {
+                                    val snappedP = trySnapPoint(p)
+                                    val rawAngle = kotlin.math.atan2((snappedP.y - start.y).toDouble(), (snappedP.x - start.x).toDouble())
+                                    val angle = if (orthoOn) snapToOrtho(rawAngle) else rawAngle
+                                    pendingLineDirection = start to angle
+                                }
+                            })
                             Tool.TEXT -> detectTapGestures(onTap = { p -> pendingTextPos = p })
                             Tool.SELECT -> detectTapGestures(onTap = { p ->
                                 val idx = hitTest(p)
@@ -402,9 +480,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                     }
                     val s = dragStart; val c = dragCurrent
-                    if (s != null && c != null) {
-                        if (tool == Tool.LINE) drawLine(Color.Gray, s, c, strokeWidth = 4f)
-                        else if (tool == Tool.CIRCLE) drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+                    if (s != null && c != null && tool == Tool.CIRCLE) {
+                        drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+                    }
+                    lineStartPoint?.let { p ->
+                        drawCircle(Color(0xFFE65100), radius = 8f, center = p)
                     }
                 }
             }
@@ -417,6 +497,40 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
         }
     }
+}
+
+/** Direction is already set (from the two-tap gesture); this just asks for the exact length. */
+@Composable
+private fun LineLengthDialog(onConfirm: (mm: Double) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var showHandwrite by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    if (showHandwrite) {
+        HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
+    }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Line length") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Length (mm)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v != null && v > 0) onConfirm(v) else error = "Enter a valid length"
+            }) { Text("Draw") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
 }
 
 @Composable
