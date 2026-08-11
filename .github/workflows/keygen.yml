@@ -1,0 +1,46 @@
+name: Generate Play Store upload keystore
+
+# One-time, optional: creates a DEDICATED Play Store upload keystore (separate from the
+# committed local "stable" key used for day-to-day APK/AAB builds) from the password secrets,
+# and publishes it (jks + base64) as a release asset to download. Run once, save the keystore
+# safely, set the UPLOAD_* repo secrets from it, then never run again.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keygen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate keystore
+        env:
+          KS_PASS: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+        run: |
+          keytool -genkeypair -v \
+            -keystore upload-keystore.jks \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+            -dname "CN=Sketch DXF, OU=Mobile, O=Sketch DXF, L=NA, S=NA, C=IN"
+          base64 -w0 upload-keystore.jks > upload-keystore.b64
+
+      - name: Publish keystore to Release (private repo — auth needed to download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: keystore
+          name: Upload keystore (delete after saving)
+          files: |
+            upload-keystore.jks
+            upload-keystore.b64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
