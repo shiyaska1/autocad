@@ -47,7 +47,7 @@ object DxfWriter {
         fun sx(x: Float) = x * scale
         fun sy(y: Float) = (maxY - y) * scale
 
-        return shapes.mapNotNull { s ->
+        return shapes.flatMap { s ->
             when (s.kind) {
                 ShapeKind.LINE -> {
                     var x1 = sx(s.x1); var y1 = sy(s.y1)
@@ -61,11 +61,19 @@ object DxfWriter {
                             x2 = mx + (x2 - mx) * f; y2 = my + (y2 - my) * f
                         }
                     }
-                    Entity.Line(x1, y1, x2, y2)
+                    listOf(Entity.Line(x1, y1, x2, y2))
                 }
-                ShapeKind.CIRCLE -> Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale)
-                ShapeKind.TEXT -> if (s.label.isNotBlank()) Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label) else null
-                else -> null
+                ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale))
+                ShapeKind.TEXT -> if (s.label.isNotBlank()) listOf(Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label)) else emptyList()
+                ShapeKind.DIMENSION -> {
+                    // Not a live/associative DXF DIMENSION entity — a plain line + text label that
+                    // reads correctly when opened, without needing a dimension-style block setup.
+                    val x1 = sx(s.x1); val y1 = sy(s.y1); val x2 = sx(s.x2); val y2 = sy(s.y2)
+                    val entities = mutableListOf<Entity>(Entity.Line(x1, y1, x2, y2))
+                    if (s.label.isNotBlank()) entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, 2.5, s.label))
+                    entities
+                }
+                else -> emptyList()
             }
         }
     }

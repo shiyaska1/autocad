@@ -36,6 +36,10 @@ object PreviewRenderer {
                     minX = min(minX, s.x1); maxX = max(maxX, s.x1)
                     minY = min(minY, s.y1); maxY = max(maxY, s.y1)
                 }
+                ShapeKind.DIMENSION -> {
+                    minX = min(minX, min(s.x1, s.x2)); maxX = max(maxX, max(s.x1, s.x2))
+                    minY = min(minY, min(s.y1, s.y2)); maxY = max(maxY, max(s.y1, s.y2))
+                }
             }
         }
         val w = (maxX - minX).coerceAtLeast(1f)
@@ -62,6 +66,15 @@ object PreviewRenderer {
                 }
                 ShapeKind.CIRCLE -> canvas.drawCircle(px(s.cx), py(s.cy), s.r * fit, linePaint)
                 ShapeKind.TEXT -> if (s.label.isNotBlank()) canvas.drawText(s.label, px(s.x1), py(s.y1), labelPaint)
+                ShapeKind.DIMENSION -> {
+                    val dimPaint = Paint().apply { color = 0xFF6A1B9A.toInt(); strokeWidth = 3f; isAntiAlias = true }
+                    canvas.drawLine(px(s.x1), py(s.y1), px(s.x2), py(s.y2), dimPaint)
+                    if (s.label.isNotBlank()) {
+                        val mx = (px(s.x1) + px(s.x2)) / 2f
+                        val my = (py(s.y1) + py(s.y2)) / 2f
+                        canvas.drawText(s.label, mx + 4f, my - 4f, Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = 20f; isAntiAlias = true })
+                    }
+                }
             }
         }
         return bmp

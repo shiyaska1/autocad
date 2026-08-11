@@ -35,6 +35,8 @@ object ShapeKind {
     const val LINE = "LINE"
     const val CIRCLE = "CIRCLE"
     const val TEXT = "TEXT"
+    /** A linear/aligned dimension annotation: x1,y1 -> x2,y2 with [SketchShape.label] as its text. */
+    const val DIMENSION = "DIMENSION"
 }
 
 /**
