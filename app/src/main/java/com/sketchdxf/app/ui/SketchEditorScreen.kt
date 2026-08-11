@@ -19,8 +19,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.ShowChart
+import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -96,6 +98,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     val sourcesRef = remember { mutableStateListOf<com.sketchdxf.app.data.SketchSource>() }
     val shapes = remember { mutableStateListOf<SketchShape>() }
 
+    // Undo/redo: whole-list snapshots, pushed right before each mutation. Simple and reliable —
+    // every tool (line, circle, text, room plan, edit, delete) shares one history this way.
+    val undoStack = remember { mutableStateListOf<List<SketchShape>>() }
+    val redoStack = remember { mutableStateListOf<List<SketchShape>>() }
+    fun pushUndo() {
+        undoStack.add(shapes.toList())
+        redoStack.clear()
+        if (undoStack.size > 50) undoStack.removeAt(0)
+    }
+    fun undo() {
+        if (undoStack.isEmpty()) return
+        redoStack.add(shapes.toList())
+        val prev = undoStack.removeAt(undoStack.lastIndex)
+        shapes.clear(); shapes.addAll(prev)
+    }
+    fun redo() {
+        if (redoStack.isEmpty()) return
+        undoStack.add(shapes.toList())
+        val next = redoStack.removeAt(redoStack.lastIndex)
+        shapes.clear(); shapes.addAll(next)
+    }
+
     LaunchedEffect(Unit) {
         workId = PendingSketchEditor.workId
         createdAt = PendingSketchEditor.createdAt
@@ -167,6 +191,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
      * shortcut, mirroring what an AutoCAD macro of the same shape would do with GetPoint clicks.
      */
     fun addRoomPlan(lengthMm: Double, widthMm: Double, wallMm: Double) {
+        pushUndo()
         val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
         val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: 1000f
         val scale = minOf((cw * 0.85f) / lengthMm.toFloat(), (ch * 0.85f) / widthMm.toFloat())
@@ -254,6 +279,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val innerB = Offset(b.x + wallPx * (n.x + d.x), b.y + wallPx * (n.y + d.y))
             newShapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = innerA.x, y1 = innerA.y, x2 = innerB.x, y2 = innerB.y))
         }
+        pushUndo()
         shapes.addAll(newShapes)
         return null
     }
@@ -312,8 +338,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     if (editingIndex >= 0 && editingIndex < shapes.size) {
         ShapeEditDialog(
             shape = shapes[editingIndex],
-            onConfirm = { updated -> shapes[editingIndex] = updated; editingIndex = -1 },
-            onDelete = { shapes.removeAt(editingIndex); editingIndex = -1 },
+            onConfirm = { updated -> pushUndo(); shapes[editingIndex] = updated; editingIndex = -1 },
+            onDelete = { pushUndo(); shapes.removeAt(editingIndex); editingIndex = -1 },
             onDismiss = { editingIndex = -1 }
         )
     }
@@ -322,7 +348,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             title = "Text label",
             initial = "",
             onConfirm = { text ->
-                if (text.isNotBlank()) shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text))
+                if (text.isNotBlank()) {
+                    pushUndo()
+                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text))
+                }
                 pendingTextPos = null
             },
             onDismiss = { pendingTextPos = null }
@@ -371,6 +400,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     )
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = {
+                    IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
+                    IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
@@ -435,7 +468,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     val s = dragStart; val c = dragCurrent
                                     if (s != null && c != null) {
                                         val len = hypotF(c.x - s.x, c.y - s.y)
-                                        if (len > 12f) shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len))
+                                        if (len > 12f) {
+                                            pushUndo()
+                                            shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len))
+                                        }
                                     }
                                     dragStart = null; dragCurrent = null
                                 }
@@ -448,6 +484,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     val snapped = trySnapPoint(p)
                                     val end = if (orthoOn) orthoProject(start, snapped) else snapped
                                     if (hypotF(end.x - start.x, end.y - start.y) > 4f) {
+                                        pushUndo()
                                         shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false))
                                         pendingLengthIndex = shapes.lastIndex
                                         lineStartPoint = if (chainOn) end else null
