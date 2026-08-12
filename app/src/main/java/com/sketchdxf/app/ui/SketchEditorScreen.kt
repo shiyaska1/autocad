@@ -83,7 +83,12 @@ import com.sketchdxf.app.dxf.SketchAttachmentStore
 import com.sketchdxf.app.ui.common.HandwriteInputDialog
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.acos
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.sin
+import kotlin.math.tan
 
 /** kotlin.math.hypot only has a (Double, Double) overload — this fills the (Float, Float) gap. */
 private fun hypotF(x: Float, y: Float): Float = hypot(x.toDouble(), y.toDouble()).toFloat()
@@ -592,20 +597,24 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     if (pendingLengthIndex in shapes.indices) {
         val drawn = shapes[pendingLengthIndex]
         val asDrawnMm = hypotF(drawn.x2 - drawn.x1, drawn.y2 - drawn.y1) / currentPxPerMm()
-        OptionalDistanceDialog(
-            title = "Line length",
+        val asDrawnAngleDeg = normalizeDeg(Math.toDegrees(atan2((drawn.y2 - drawn.y1).toDouble(), (drawn.x2 - drawn.x1).toDouble())).toFloat())
+        // Ortho already guarantees a clean 0/90/180/270° line, so only ask for an exact angle
+        // when Ortho is off and the tapped angle isn't one of those already.
+        val showAngleField = !orthoOn && !isOrthoAngle(asDrawnAngleDeg)
+        LineFinishDialog(
             asIsMm = asDrawnMm,
-            fieldLabel = "Exact length (mm) — optional",
-            onSetExact = { mm ->
+            asIsAngleDeg = asDrawnAngleDeg,
+            showAngleField = showAngleField,
+            onApply = { mm, angleDeg ->
                 val cur = shapes[pendingLengthIndex]
-                val curLenPx = hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
-                if (curLenPx > 1e-3f) {
-                    val f = (mm.toFloat() * currentPxPerMm()) / curLenPx
-                    shapes[pendingLengthIndex] = cur.copy(
-                        x2 = cur.x1 + (cur.x2 - cur.x1) * f,
-                        y2 = cur.y1 + (cur.y2 - cur.y1) * f,
-                        realLength = mm, confirmed = true
-                    )
+                val start = Offset(cur.x1, cur.y1)
+                val lenPx = if (mm != null) mm.toFloat() * currentPxPerMm() else hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
+                val angRad = Math.toRadians((angleDeg ?: asDrawnAngleDeg).toDouble())
+                val newEnd = Offset(start.x + (lenPx * cos(angRad)).toFloat(), start.y + (lenPx * sin(angRad)).toFloat())
+                shapes[pendingLengthIndex] = if (mm != null) {
+                    cur.copy(x2 = newEnd.x, y2 = newEnd.y, realLength = mm, confirmed = true)
+                } else {
+                    cur.copy(x2 = newEnd.x, y2 = newEnd.y)
                 }
                 pendingLengthIndex = -1
             },
@@ -1189,6 +1198,76 @@ private fun OptionalDistanceDialog(
     )
 }
 
+/**
+ * Same "as tapped, optionally override" pattern as [OptionalDistanceDialog], but for the Line
+ * tool specifically: length is always editable, and — only when Ortho is off and the tapped line
+ * isn't already horizontal/vertical — an exact angle field appears too. Either field can be left
+ * blank to keep that value as tapped; both can be set together.
+ */
+@Composable
+private fun LineFinishDialog(
+    asIsMm: Float,
+    asIsAngleDeg: Float,
+    showAngleField: Boolean,
+    onApply: (mm: Double?, angleDeg: Float?) -> Unit,
+    onUseAsIs: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var lengthText by remember { mutableStateOf("") }
+    var angleText by remember { mutableStateOf("") }
+    var showHandwrite by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    if (showHandwrite) {
+        HandwriteInputDialog(onResult = { lengthText = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
+    }
+    AlertDialog(
+        onDismissRequest = onUseAsIs,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (showAngleField) "Line length & angle" else "Line length", modifier = Modifier.weight(1f))
+                IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel — remove") }
+            }
+        },
+        text = {
+            Column {
+                val asTapped = "As tapped: ~${trimNum(asIsMm.toDouble())}mm" +
+                    (if (showAngleField) " at ${trimNum(asIsAngleDeg.toDouble())}°" else "") +
+                    ". Type exact values to override, or use it as tapped."
+                Text(asTapped, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                OutlinedTextField(
+                    value = lengthText, onValueChange = { lengthText = it; error = null }, singleLine = true,
+                    label = { Text("Exact length (mm) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                if (showAngleField) {
+                    OutlinedTextField(
+                        value = angleText, onValueChange = { angleText = it; error = null }, singleLine = true,
+                        label = { Text("Exact angle (° from horizontal) — optional") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val mm = if (lengthText.isBlank()) null else lengthText.toDoubleOrNull()
+                val angle = if (angleText.isBlank()) null else angleText.toFloatOrNull()
+                when {
+                    lengthText.isNotBlank() && mm == null -> error = "Enter a valid length"
+                    angleText.isNotBlank() && angle == null -> error = "Enter a valid angle"
+                    mm == null && angle == null -> onUseAsIs()
+                    else -> onApply(mm, angle)
+                }
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as tapped") } }
+    )
+}
+
 @Composable
 private fun ShapeEditDialog(shape: SketchShape, onConfirm: (SketchShape) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
     when (shape.kind) {
@@ -1352,6 +1431,16 @@ private fun LabelInputDialog(
             }
         }
     )
+}
+
+/** Wraps a degree value into the 0..360 range (exclusive of 360). */
+private fun normalizeDeg(deg: Float): Float = ((deg % 360f) + 360f) % 360f
+
+/** True if [deg] (already normalized) is within ~1° of a multiple of 90 — i.e. Ortho would have
+ *  produced this angle anyway, so there's nothing extra to ask the user for. */
+private fun isOrthoAngle(deg: Float): Boolean {
+    val fromNearest90 = ((deg % 90f) + 90f) % 90f
+    return fromNearest90 < 1f || fromNearest90 > 89f
 }
 
 private fun distToSegment(p: Offset, a: Offset, b: Offset): Float {
