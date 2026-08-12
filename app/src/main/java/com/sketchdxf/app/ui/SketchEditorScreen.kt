@@ -766,7 +766,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.TRIM -> "Tap the side of the line to remove"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
-                    tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag a box to select shapes, or tap one"
+                    tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
                     tool == Tool.BOX_SELECT -> "${selectedIndices.size} selected — Move, Copy or Delete below, or drag a new box"
                     else -> "Pinch to zoom, drag to pan"
                 },
@@ -943,8 +943,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                     val rect = androidx.compose.ui.geometry.Rect(
                                                         minOf(s.x, c.x), minOf(s.y, c.y), maxOf(s.x, c.x), maxOf(s.y, c.y)
                                                     )
+                                                    // AutoCAD convention: left-to-right drag = Window (only shapes
+                                                    // fully enclosed); right-to-left = Crossing (anything touched too).
+                                                    val isWindow = c.x >= s.x
                                                     selectedIndices.clear()
-                                                    shapes.forEachIndexed { i, sh -> if (rect.overlaps(shapeBounds(sh))) selectedIndices.add(i) }
+                                                    shapes.forEachIndexed { i, sh ->
+                                                        val b = shapeBounds(sh)
+                                                        val hit = if (isWindow) {
+                                                            rect.left <= b.left && rect.top <= b.top && rect.right >= b.right && rect.bottom >= b.bottom
+                                                        } else {
+                                                            rect.overlaps(b)
+                                                        }
+                                                        if (hit) selectedIndices.add(i)
+                                                    }
                                                 } else {
                                                     val idx = hitTest(s)
                                                     if (idx >= 0) {
@@ -1059,10 +1070,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 if (s2 != null && c2 != null) {
                                     val topLeft = Offset(minOf(s2.x, c2.x), minOf(s2.y, c2.y))
                                     val boxSize = androidx.compose.ui.geometry.Size(abs(c2.x - s2.x), abs(c2.y - s2.y))
-                                    drawRect(Color(0xFF1565C0).copy(alpha = 0.12f), topLeft = topLeft, size = boxSize)
+                                    // Same colour/line-style cue AutoCAD uses: solid blue = Window, dashed green = Crossing.
+                                    val isWindow = c2.x >= s2.x
+                                    val boxColor = if (isWindow) Color(0xFF1565C0) else Color(0xFF2E7D32)
+                                    drawRect(boxColor.copy(alpha = 0.12f), topLeft = topLeft, size = boxSize)
                                     drawRect(
-                                        Color(0xFF1565C0), topLeft = topLeft, size = boxSize,
-                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
+                                        boxColor, topLeft = topLeft, size = boxSize,
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                            width = 2f,
+                                            pathEffect = if (isWindow) null else androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                                        )
                                     )
                                 }
                             }
