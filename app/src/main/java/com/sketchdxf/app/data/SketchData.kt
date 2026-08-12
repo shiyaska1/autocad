@@ -148,7 +148,14 @@ data class SketchShape(
      *  arc/polyline be made thicker so it's still visible on a very large drawing zoomed far out,
      *  where the default width can shrink to near-invisible on screen. See SketchEditorScreen's
      *  shape-edit dialogs. */
-    val strokeWidth: Float = 0f
+    val strokeWidth: Float = 0f,
+    /** DIMENSION only: how far (px, perpendicular to the measured x1,y1→x2,y2 segment) the
+     *  dimension line is drawn off to the side of the actual measured points, with short
+     *  extension lines connecting back to them — like a real AutoCAD linear dimension, so the
+     *  dimension line and its text sit clear of the object instead of drawn right on top of it.
+     *  0 (the default — every dimension saved before this existed reads back as 0) draws directly
+     *  on the measured points, unchanged from before. Sign picks which side it's offset to. */
+    val dimOffset: Float = 0f
 )
 
 /** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips

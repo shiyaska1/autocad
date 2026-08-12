@@ -472,6 +472,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return hypotF(dx, dy)
     }
 
+    /** The actual dimension-line endpoints for a DIMENSION shape: [SketchShape.x1,y1]/[x2,y2]
+     *  offset perpendicular to the measured segment by [SketchShape.dimOffset] px, so the
+     *  dimension line (and its text) sit clear of the object being measured instead of drawn
+     *  right on top of it — with short extension lines back to the actual measured points, like a
+     *  real AutoCAD linear dimension. dimOffset == 0 (e.g. dimensions saved before this existed)
+     *  draws exactly on the measured points, unchanged from before. */
+    fun dimLineEndpoints(s: SketchShape): Pair<Offset, Offset> {
+        val base1 = Offset(s.x1, s.y1); val base2 = Offset(s.x2, s.y2)
+        if (s.dimOffset == 0f) return base1 to base2
+        val dx = s.x2 - s.x1; val dy = s.y2 - s.y1
+        val len = hypotF(dx, dy)
+        if (len < 1e-3f) return base1 to base2
+        val nx = -dy / len * s.dimOffset; val ny = dx / len * s.dimOffset
+        return Offset(base1.x + nx, base1.y + ny) to Offset(base2.x + nx, base2.y + ny)
+    }
+
     fun hitTest(p: Offset): Int {
         var best = -1; var bestDist = 26f
         shapes.forEachIndexed { i, s ->
@@ -482,7 +498,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     val (w, h) = textExtent(s)
                     distToRect(p, androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f))
                 }
-                ShapeKind.DIMENSION -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
+                ShapeKind.DIMENSION -> {
+                    // Hit-test the line as it's actually drawn (offset from the object, if any),
+                    // not the invisible measured segment — otherwise tapping the visible dimension
+                    // line/text wouldn't select it once it's drawn clear of the object.
+                    val (dp1, dp2) = dimLineEndpoints(s)
+                    distToSegment(p, dp1, dp2)
+                }
                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
                     if (pts.size < 2) Float.MAX_VALUE
@@ -528,6 +550,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         ShapeKind.ARC -> {
             val pts = arcPoints(s)
             androidx.compose.ui.geometry.Rect(pts.minOf { it.x }, pts.minOf { it.y }, pts.maxOf { it.x }, pts.maxOf { it.y })
+        }
+        ShapeKind.DIMENSION -> {
+            // Covers both the measured points and the (possibly offset) drawn dimension line, so
+            // panning/box-select account for the extension lines too.
+            val (dp1, dp2) = dimLineEndpoints(s)
+            androidx.compose.ui.geometry.Rect(
+                minOf(s.x1, s.x2, dp1.x, dp2.x), minOf(s.y1, s.y2, dp1.y, dp2.y),
+                maxOf(s.x1, s.x2, dp1.x, dp2.x), maxOf(s.y1, s.y2, dp1.y, dp2.y)
+            )
         }
         else -> androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
     }
@@ -1157,7 +1188,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             initial = "",
             showFontSize = true,
             unitLabel = unit,
-            onConfirm = { text, _, fontSizeMm, _ ->
+            onConfirm = { text, _, fontSizeMm, _, _ ->
                 if (text.isNotBlank()) {
                     pushUndo()
                     shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm))
@@ -1264,9 +1295,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val measuredMm = hypotF(p2.x - p1.x, p2.y - p1.y) / currentPxPerMm()
         DimensionTextDialog(
             initialText = "${trimNum(mmToDisplay(measuredMm.toDouble(), unit))}$unit",
-            onConfirm = { text ->
+            unitLabel = unit,
+            onConfirm = { text, fontSizeMm, offsetPx ->
                 pushUndo()
-                shapes.add(SketchShape(workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, label = text, color = currentColor?.toArgb()))
+                shapes.add(
+                    SketchShape(
+                        workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y,
+                        label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm, dimOffset = offsetPx
+                    )
+                )
                 pendingDimension = null
             },
             onCancel = { pendingDimension = null }
@@ -2101,8 +2138,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
-                                    val p1 = Offset(s.x1, s.y1); val p2 = Offset(s.x2, s.y2)
                                     val dimW = strokeW(s, 3f, isHighlighted)
+                                    val base1 = Offset(s.x1, s.y1); val base2 = Offset(s.x2, s.y2)
+                                    val (p1, p2) = dimLineEndpoints(s)
+                                    // Extension (witness) lines from the actual measured points out to
+                                    // the offset dimension line — only when there's an offset to show.
+                                    if (s.dimOffset != 0f) {
+                                        drawLine(dimColor, base1, p1, strokeWidth = 1.5f)
+                                        drawLine(dimColor, base2, p2, strokeWidth = 1.5f)
+                                    }
                                     drawLine(dimColor, p1, p2, strokeWidth = dimW)
                                     // small perpendicular ticks at each end, like a dimension line
                                     val dx = p2.x - p1.x; val dy = p2.y - p1.y
@@ -2114,9 +2158,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     }
                                     if (s.label.isNotBlank()) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
+                                        val effTextSize = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else dimTextSize
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
-                                            android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = dimTextSize }
+                                            android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = effTextSize }
                                         )
                                     }
                                 }
@@ -2307,9 +2352,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
  * Nothing is created until Confirm — Cancel just discards the two picked points.
  */
 @Composable
-private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
+private fun DimensionTextDialog(
+    initialText: String,
+    initialOffsetPx: Float = 30f,
+    unitLabel: String = "mm",
+    onConfirm: (text: String, fontSizeMm: Float, offsetPx: Float) -> Unit,
+    onCancel: () -> Unit
+) {
     var text by remember { mutableStateOf(initialText) }
     var showHandwrite by remember { mutableStateOf(false) }
+    var fontSizeText by remember { mutableStateOf("") }
+    var offsetText by remember { mutableStateOf(trimNum(initialOffsetPx.toDouble())) }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
@@ -2320,9 +2373,29 @@ private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit
             Column {
                 OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                OutlinedTextField(
+                    value = fontSizeText, onValueChange = { fontSizeText = it }, singleLine = true,
+                    label = { Text("Text size ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                OutlinedTextField(
+                    value = offsetText, onValueChange = { offsetText = it }, singleLine = true,
+                    label = { Text("Offset from object (px) — 0 draws on the object") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
             }
         },
-        confirmButton = { TextButton(onClick = { if (text.isNotBlank()) onConfirm(text) }) { Text("Add") } },
+        confirmButton = {
+            TextButton(onClick = {
+                if (text.isNotBlank()) {
+                    val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
+                    val offsetPx = offsetText.toFloatOrNull() ?: initialOffsetPx
+                    onConfirm(text, fontSizeMm, offsetPx)
+                }
+            }) { Text("Add") }
+        },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
 }
@@ -2809,17 +2882,21 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 initial = shape.label,
                 initialColor = shape.color?.let { Color(it) },
                 showColorPicker = true,
-                showFontSize = shape.kind == ShapeKind.TEXT,
+                showFontSize = shape.kind == ShapeKind.TEXT || shape.kind == ShapeKind.DIMENSION,
                 initialFontSizeMm = shape.fontSize,
                 showStrokeWidth = shape.kind != ShapeKind.TEXT,
                 initialStrokeWidthPx = shape.strokeWidth,
+                showDimOffset = shape.kind == ShapeKind.DIMENSION,
+                initialDimOffsetPx = shape.dimOffset,
                 unitLabel = unitLabel,
-                onConfirm = { text, color, fontSizeMm, strokeWidthPx ->
+                onConfirm = { text, color, fontSizeMm, strokeWidthPx, dimOffsetPx ->
+                    val usesFontSize = shape.kind == ShapeKind.TEXT || shape.kind == ShapeKind.DIMENSION
                     onConfirm(
                         shape.copy(
                             label = text, color = color?.toArgb(),
-                            fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize,
-                            strokeWidth = if (shape.kind != ShapeKind.TEXT) strokeWidthPx else shape.strokeWidth
+                            fontSize = if (usesFontSize) fontSizeMm else shape.fontSize,
+                            strokeWidth = if (shape.kind != ShapeKind.TEXT) strokeWidthPx else shape.strokeWidth,
+                            dimOffset = if (shape.kind == ShapeKind.DIMENSION) dimOffsetPx else shape.dimOffset
                         )
                     )
                 },
@@ -2941,8 +3018,10 @@ private fun LabelInputDialog(
     initialFontSizeMm: Float = 0f,
     showStrokeWidth: Boolean = false,
     initialStrokeWidthPx: Float = 0f,
+    showDimOffset: Boolean = false,
+    initialDimOffsetPx: Float = 0f,
     unitLabel: String = "mm",
-    onConfirm: (text: String, color: Color?, fontSizeMm: Float, strokeWidthPx: Float) -> Unit,
+    onConfirm: (text: String, color: Color?, fontSizeMm: Float, strokeWidthPx: Float, dimOffsetPx: Float) -> Unit,
     onDelete: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -2955,6 +3034,7 @@ private fun LabelInputDialog(
     var widthText by remember {
         mutableStateOf(if (initialStrokeWidthPx > 0f) trimNum(initialStrokeWidthPx.toDouble()) else "")
     }
+    var dimOffsetText by remember { mutableStateOf(trimNum(initialDimOffsetPx.toDouble())) }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
@@ -2984,13 +3064,22 @@ private fun LabelInputDialog(
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                 }
+                if (showDimOffset) {
+                    OutlinedTextField(
+                        value = dimOffsetText, onValueChange = { dimOffsetText = it }, singleLine = true,
+                        label = { Text("Offset from object (px) — 0 draws on the object; negative flips the side") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
                 val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
                 val strokeWidthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
-                onConfirm(text, pickedColor, fontSizeMm, strokeWidthPx)
+                val dimOffsetPx = dimOffsetText.toFloatOrNull() ?: initialDimOffsetPx
+                onConfirm(text, pickedColor, fontSizeMm, strokeWidthPx, dimOffsetPx)
             }) { Text("Save") }
         },
         dismissButton = {
