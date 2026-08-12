@@ -263,19 +263,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
 
-    /** Keeps the drawing area always at least partly on screen — panning/zooming can't drag the
-     *  whole thing out of view (when zoomed in, the viewport can't go past the content's edges;
-     *  when zoomed out, the smaller content can't be pushed fully off the visible area). */
-    fun clampViewOffset(offset: Offset, scale: Float): Offset {
-        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
-        if (cw <= 0f || ch <= 0f) return offset
-        val slackX = cw - cw * scale; val slackY = ch - ch * scale
-        return Offset(
-            offset.x.coerceIn(minOf(0f, slackX), maxOf(0f, slackX)),
-            offset.y.coerceIn(minOf(0f, slackY), maxOf(0f, slackY))
-        )
-    }
-
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
     // Typing an exact length afterward is optional; skipping it just keeps the line as tapped.
@@ -505,6 +492,29 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         else -> androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
     }
 
+    /** Keeps the drawing area always reachable by panning — not just the nominal canvas box, but
+     *  the union of that box and every shape's own bounds. A shape confirmed at a real-world
+     *  length (e.g. a 1500mm wall) can easily extend far outside the canvas's own pixel box at
+     *  the current scale; clamping to just the canvas box (as this used to) made the far end of
+     *  a shape like that permanently unreachable by panning, and zoom alone couldn't shrink it
+     *  into view either — see the pinch-zoom handler's widened scale range below. */
+    fun clampViewOffset(offset: Offset, scale: Float): Offset {
+        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
+        if (cw <= 0f || ch <= 0f) return offset
+        var left = 0f; var top = 0f; var right = cw; var bottom = ch
+        shapes.forEach { s ->
+            val b = shapeBounds(s)
+            left = minOf(left, b.left); top = minOf(top, b.top)
+            right = maxOf(right, b.right); bottom = maxOf(bottom, b.bottom)
+        }
+        val minOffsetX = cw - right * scale; val maxOffsetX = -left * scale
+        val minOffsetY = ch - bottom * scale; val maxOffsetY = -top * scale
+        return Offset(
+            offset.x.coerceIn(minOf(minOffsetX, maxOffsetX), maxOf(minOffsetX, maxOffsetX)),
+            offset.y.coerceIn(minOf(minOffsetY, maxOffsetY), maxOf(minOffsetY, maxOffsetY))
+        )
+    }
+
     /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
      *  fits back on screen at once. */
     fun fitToScreen() {
@@ -520,7 +530,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
         val spanX = (maxX - minX).coerceAtLeast(1f)
         val spanY = (maxY - minY).coerceAtLeast(1f)
-        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.5f, 6f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
         val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
         viewScale = scale
         viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
@@ -1603,7 +1613,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
                         // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
                         detectPanOrZoom(requireTwoFingers = tool != Tool.PAN) { pan, zoom ->
-                            viewScale = (viewScale * zoom).coerceIn(0.5f, 6f)
+                            viewScale = (viewScale * zoom).coerceIn(0.02f, 6f)
                             viewOffset = clampViewOffset(viewOffset + pan, viewScale)
                         }
                     }
