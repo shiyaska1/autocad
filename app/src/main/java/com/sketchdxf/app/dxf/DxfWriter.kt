@@ -11,10 +11,11 @@ import kotlin.math.hypot
 object DxfWriter {
 
     private sealed class Entity {
-        data class Line(val x1: Double, val y1: Double, val x2: Double, val y2: Double) : Entity()
-        data class Circle(val cx: Double, val cy: Double, val r: Double) : Entity()
-        data class Text(val x: Double, val y: Double, val height: Double, val value: String) : Entity()
-        data class Arc(val cx: Double, val cy: Double, val r: Double, val startAngle: Double, val endAngle: Double) : Entity()
+        abstract val color: Int?
+        data class Line(val x1: Double, val y1: Double, val x2: Double, val y2: Double, override val color: Int? = null) : Entity()
+        data class Circle(val cx: Double, val cy: Double, val r: Double, override val color: Int? = null) : Entity()
+        data class Text(val x: Double, val y: Double, val height: Double, val value: String, override val color: Int? = null) : Entity()
+        data class Arc(val cx: Double, val cy: Double, val r: Double, val startAngle: Double, val endAngle: Double, override val color: Int? = null) : Entity()
     }
 
     /**
@@ -68,20 +69,20 @@ object DxfWriter {
                             x2 = mx + (x2 - mx) * f; y2 = my + (y2 - my) * f
                         }
                     }
-                    listOf(Entity.Line(x1, y1, x2, y2))
+                    listOf(Entity.Line(x1, y1, x2, y2, s.color))
                 }
-                ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale))
-                ShapeKind.TEXT -> if (s.label.isNotBlank()) listOf(Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label)) else emptyList()
+                ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale, s.color))
+                ShapeKind.TEXT -> if (s.label.isNotBlank()) listOf(Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label, s.color)) else emptyList()
                 ShapeKind.DIMENSION -> {
                     // Not a live/associative DXF DIMENSION entity — a plain line + text label that
                     // reads correctly when opened, without needing a dimension-style block setup.
                     val x1 = sx(s.x1); val y1 = sy(s.y1); val x2 = sx(s.x2); val y2 = sy(s.y2)
-                    val entities = mutableListOf<Entity>(Entity.Line(x1, y1, x2, y2))
-                    if (s.label.isNotBlank()) entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, 2.5, s.label))
+                    val entities = mutableListOf<Entity>(Entity.Line(x1, y1, x2, y2, s.color))
+                    if (s.label.isNotBlank()) entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, 2.5, s.label, s.color))
                     entities
                 }
                 ShapeKind.FREEHAND -> SketchPath.parse(s.path).zipWithNext { (ax, ay), (bx, by) ->
-                    Entity.Line(sx(ax), sy(ay), sx(bx), sy(by))
+                    Entity.Line(sx(ax), sy(ay), sx(bx), sy(by), s.color)
                 }
                 ShapeKind.ARC -> {
                     // Recompute the sweep in DXF's own (Y-flipped) space rather than reusing the
@@ -96,7 +97,7 @@ object DxfWriter {
                     if (sweep < -180.0) sweep += 360.0
                     val (start50, end51) = if (sweep >= 0.0) a1 to (a1 + sweep) else (a1 + sweep) to a1
                     fun norm360(d: Double) = ((d % 360.0) + 360.0) % 360.0
-                    listOf(Entity.Arc(dxfCx, dxfCy, dxfR, norm360(start50), norm360(end51)))
+                    listOf(Entity.Arc(dxfCx, dxfCy, dxfR, norm360(start50), norm360(end51), s.color))
                 }
                 else -> emptyList()
             }
@@ -107,6 +108,10 @@ object DxfWriter {
         val sb = StringBuilder()
         fun code(n: Int, v: String) { sb.append(n).append('\n').append(v).append('\n') }
         fun code(n: Int, v: Double) { code(n, "%.4f".format(v)) }
+        fun code(n: Int, v: Int) { code(n, v.toString()) }
+        // Group 420 is a 24-bit true colour (0x00RRGGBB, no alpha) — write it right after the
+        // layer code so a shape's own explicit colour overrides the by-layer default (ACI 256).
+        fun colorCode(color: Int?) { color?.let { code(420, it and 0x00FFFFFF) } }
 
         code(0, "SECTION"); code(2, "HEADER")
         code(9, "\$INSUNITS"); code(70, "4") // 4 = millimeters
@@ -116,23 +121,23 @@ object DxfWriter {
         entities.forEach { e ->
             when (e) {
                 is Entity.Line -> {
-                    code(0, "LINE"); code(8, "0")
+                    code(0, "LINE"); code(8, "0"); colorCode(e.color)
                     code(10, e.x1); code(20, e.y1); code(30, 0.0)
                     code(11, e.x2); code(21, e.y2); code(31, 0.0)
                 }
                 is Entity.Circle -> {
-                    code(0, "CIRCLE"); code(8, "0")
+                    code(0, "CIRCLE"); code(8, "0"); colorCode(e.color)
                     code(10, e.cx); code(20, e.cy); code(30, 0.0)
                     code(40, e.r)
                 }
                 is Entity.Text -> {
-                    code(0, "TEXT"); code(8, "0")
+                    code(0, "TEXT"); code(8, "0"); colorCode(e.color)
                     code(10, e.x); code(20, e.y); code(30, 0.0)
                     code(40, e.height)
                     code(1, e.value)
                 }
                 is Entity.Arc -> {
-                    code(0, "ARC"); code(8, "0")
+                    code(0, "ARC"); code(8, "0"); colorCode(e.color)
                     code(10, e.cx); code(20, e.cy); code(30, 0.0)
                     code(40, e.r)
                     code(50, e.startAngle); code(51, e.endAngle)

@@ -73,7 +73,10 @@ data class SketchShape(
     val realLength: Double = 0.0,
     val confirmed: Boolean = false,
     /** FREEHAND only: the stroke's points as "x,y;x,y;x,y…" — see [SketchPath]. */
-    val path: String = ""
+    val path: String = "",
+    /** Explicit ARGB colour (from Color.toArgb()), or null to use this shape kind's usual default
+     *  (e.g. green when a LINE is confirmed, blue otherwise) — see SketchEditorScreen's colour picker. */
+    val color: Int? = null
 )
 
 /** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips

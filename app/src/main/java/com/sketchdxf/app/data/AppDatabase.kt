@@ -9,7 +9,7 @@ import androidx.room.migration.Migration
 
 @Database(
     entities = [SketchWork::class, SketchSource::class, SketchShape::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -31,6 +31,11 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE sketch_works ADD COLUMN unit TEXT NOT NULL DEFAULT 'mm'")
             }
         }
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sketch_shapes ADD COLUMN color INTEGER")
+            }
+        }
 
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
@@ -39,7 +44,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "sketch_dxf.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

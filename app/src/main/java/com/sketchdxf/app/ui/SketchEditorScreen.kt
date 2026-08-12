@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
@@ -60,9 +61,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -220,6 +224,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
     var dxfImportMessage by remember { mutableStateOf<String?>(null) }
+
+    // Current draw colour — applies to every newly-drawn shape (Line, Circle, Rectangle,
+    // Freehand, Text, Dimension, Room plan); null means "use this shape kind's usual default"
+    // (green when a LINE is confirmed, blue otherwise, purple for Dimension/Text, ...). Shapes
+    // derived from an existing one (Offset, Copy, Break, Stretch, Trim) keep the source's own
+    // colour automatically, since .copy() only overrides fields explicitly passed to it.
+    var currentColor by remember { mutableStateOf<Color?>(null) }
+    var showColorPicker by remember { mutableStateOf(false) }
 
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
@@ -566,7 +578,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         shapes.add(
             SketchShape(
                 workId = 0, kind = ShapeKind.ARC, cx = arcCenter.x, cy = arcCenter.y, r = effectiveRadius,
-                x1 = t1.x, y1 = t1.y, x2 = t2.x, y2 = t2.y
+                x1 = t1.x, y1 = t1.y, x2 = t2.x, y2 = t2.y, color = l1.color
             )
         )
         return null
@@ -637,7 +649,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
         fun ln(a: Offset, b: Offset, realLen: Double) = SketchShape(
             workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y,
-            realLength = realLen.coerceAtLeast(0.0), confirmed = true
+            realLength = realLen.coerceAtLeast(0.0), confirmed = true, color = currentColor?.toArgb()
         )
         val innerLen = (lengthMm - 2 * wallMm).coerceAtLeast(0.0)
         val innerWid = (widthMm - 2 * wallMm).coerceAtLeast(0.0)
@@ -697,7 +709,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val a = canvasPoints[i]; val b = canvasPoints[i + 1]
             newShapes.add(
                 SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y,
-                    realLength = segs[i].value, confirmed = true)
+                    realLength = segs[i].value, confirmed = true, color = currentColor?.toArgb())
             )
             val seg = b - a
             val len = hypotF(seg.x, seg.y)
@@ -706,7 +718,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val n = Offset(-d.y, d.x) // inward normal, for a clockwise R/B/L/T-ordered wall walk
             val innerA = Offset(a.x + wallPx * (n.x - d.x), a.y + wallPx * (n.y - d.y))
             val innerB = Offset(b.x + wallPx * (n.x + d.x), b.y + wallPx * (n.y + d.y))
-            newShapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = innerA.x, y1 = innerA.y, x2 = innerB.x, y2 = innerB.y))
+            newShapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = innerA.x, y1 = innerA.y, x2 = innerB.x, y2 = innerB.y, color = currentColor?.toArgb()))
         }
         pushUndo()
         shapes.addAll(newShapes)
@@ -829,10 +841,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         LabelInputDialog(
             title = "Text label",
             initial = "",
-            onConfirm = { text ->
+            onConfirm = { text, _ ->
                 if (text.isNotBlank()) {
                     pushUndo()
-                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text))
+                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb()))
                 }
                 pendingTextPos = null
             },
@@ -921,7 +933,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             initialText = "${trimNum(mmToDisplay(measuredMm.toDouble(), unit))}$unit",
             onConfirm = { text ->
                 pushUndo()
-                shapes.add(SketchShape(workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, label = text))
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, label = text, color = currentColor?.toArgb()))
                 pendingDimension = null
             },
             onCancel = { pendingDimension = null }
@@ -965,6 +977,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             title = { Text("Import DXF") },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { dxfImportMessage = null }) { Text("OK") } }
+        )
+    }
+    if (showColorPicker) {
+        ColorPickerDialog(
+            current = currentColor,
+            onPick = { currentColor = it },
+            onDismiss = { showColorPicker = false }
         )
     }
 
@@ -1048,6 +1067,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }, label = { Text("Stretch") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
+                FilterChip(
+                    selected = false, onClick = { showColorPicker = true },
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(16.dp).clip(CircleShape)
+                                    .background(currentColor ?: Color.LightGray)
+                                    .border(1.dp, Color.Gray, CircleShape)
+                            )
+                            Text("Colour", modifier = Modifier.padding(start = 6.dp))
+                        }
+                    }
+                )
             }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
                 Row(
@@ -1152,7 +1184,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             val len = hypotF(c.x - s.x, c.y - s.y)
                                             if (len > 12f) {
                                                 pushUndo()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len, color = currentColor?.toArgb()))
                                             }
                                         }
                                         dragStart = null; dragCurrent = null
@@ -1168,10 +1200,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             if (hypotF(c.x - s.x, c.y - s.y) > 8f) {
                                                 pushUndo()
                                                 val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y))
+                                                val rectColor = currentColor?.toArgb()
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y, color = rectColor))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y, color = rectColor))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y, color = rectColor))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y, color = rectColor))
                                             }
                                         }
                                         dragStart = null; dragCurrent = null
@@ -1186,7 +1219,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val end = if (orthoOn) orthoProject(start, snapped) else snapped
                                         if (hypotF(end.x - start.x, end.y - start.y) > 4f) {
                                             pushUndo()
-                                            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false))
+                                            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false, color = currentColor?.toArgb()))
                                             pendingLengthIndex = shapes.lastIndex
                                             lineStartPoint = if (chainOn) end else null
                                         }
@@ -1245,7 +1278,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             shapes.add(
                                                 SketchShape(
                                                     workId = 0, kind = ShapeKind.FREEHAND,
-                                                    path = SketchPath.serialize(freehandPoints.map { it.x to it.y })
+                                                    path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
+                                                    color = currentColor?.toArgb()
                                                 )
                                             )
                                         }
@@ -1387,6 +1421,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                         val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
                         val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
+                        // A shape's own explicit colour (if the user picked one) always wins over the
+                        // kind's usual default; the transient highlight (active tool selection) wins over both.
+                        fun shapeColor(s: SketchShape, default: Color, isHighlighted: Boolean): Color =
+                            if (isHighlighted) highlightPaint else s.color?.let { Color(it) } ?: default
                         shapes.forEachIndexed { i, s ->
                             val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex ||
                                 i == breakLineIndex || i == filletIndex1 || i == filletIndex2 || i in selectedIndices
@@ -1395,19 +1433,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // Confirmed lines just turn green — no automatic length label; a
                                     // real-world size only ever appears where you place it by hand
                                     // with the Dimension tool.
-                                    val lineColor = if (isHighlighted) highlightPaint else if (s.confirmed) Color(0xFF2E7D32) else linePaint
+                                    val lineColor = shapeColor(s, if (s.confirmed) Color(0xFF2E7D32) else linePaint, isHighlighted)
                                     drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = if (isHighlighted) 7f else 5f)
                                 }
                                 ShapeKind.CIRCLE -> drawCircle(
-                                    if (isHighlighted) highlightPaint else linePaint, radius = s.r, center = Offset(s.cx, s.cy),
+                                    shapeColor(s, linePaint, isHighlighted), radius = s.r, center = Offset(s.cx, s.cy),
                                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = if (isHighlighted) 7f else 5f)
                                 )
                                 ShapeKind.TEXT -> drawContext.canvas.nativeCanvas.drawText(
                                     s.label, s.x1, s.y1,
-                                    android.graphics.Paint().apply { color = (if (isHighlighted) 0xFFE65100 else 0xFF6A1B9A).toInt(); textSize = 34f }
+                                    android.graphics.Paint().apply {
+                                        color = if (isHighlighted) 0xFFE65100.toInt() else (s.color ?: 0xFF6A1B9A.toInt())
+                                        textSize = 34f
+                                    }
                                 )
                                 ShapeKind.FREEHAND -> {
-                                    val strokeColor = if (isHighlighted) highlightPaint else linePaint
+                                    val strokeColor = shapeColor(s, linePaint, isHighlighted)
                                     val strokeWidth = if (isHighlighted) 6f else 4f
                                     SketchPath.parse(s.path).zipWithNext { a, b ->
                                         drawLine(strokeColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = strokeWidth)
@@ -1416,7 +1457,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 ShapeKind.ARC -> {
                                     val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
                                     drawArc(
-                                        color = if (isHighlighted) highlightPaint else linePaint,
+                                        color = shapeColor(s, linePaint, isHighlighted),
                                         startAngle = startDeg, sweepAngle = sweepDeg, useCenter = false,
                                         topLeft = Offset(s.cx - s.r, s.cy - s.r),
                                         size = androidx.compose.ui.geometry.Size(s.r * 2f, s.r * 2f),
@@ -1424,7 +1465,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     )
                                 }
                                 ShapeKind.DIMENSION -> {
-                                    val dimColor = if (isHighlighted) highlightPaint else Color(0xFF6A1B9A)
+                                    val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
                                     val p1 = Offset(s.x1, s.y1); val p2 = Offset(s.x2, s.y2)
                                     drawLine(dimColor, p1, p2, strokeWidth = 3f)
                                     // small perpendicular ticks at each end, like a dimension line
@@ -1439,7 +1480,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
-                                            android.graphics.Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = dimTextSize }
+                                            android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = dimTextSize }
                                         )
                                     }
                                 }
@@ -1579,6 +1620,49 @@ private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit
         },
         confirmButton = { TextButton(onClick = { if (text.isNotBlank()) onConfirm(text) }) { Text("Add") } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+private val COLOR_PALETTE: List<Color> = listOf(
+    Color(0xFF000000), Color(0xFFD32F2F), Color(0xFFE65100), Color(0xFFF9A825), Color(0xFF2E7D32),
+    Color(0xFF00838F), Color(0xFF1565C0), Color(0xFF6A1B9A), Color(0xFFAD1457), Color(0xFF616161)
+)
+
+/**
+ * Picks the "current draw colour" applied to newly-drawn shapes from now on (see [currentColor]
+ * in SketchEditorScreen); existing shapes are unaffected unless edited individually. "Default"
+ * clears the override, going back to each shape kind's usual colour (green when a LINE is
+ * confirmed, blue otherwise, purple for Dimension/Text, ...).
+ */
+@Composable
+private fun ColorPickerDialog(current: Color?, onPick: (Color?) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Draw colour") },
+        text = {
+            Column {
+                Text(
+                    "Applies to shapes drawn from now on. Existing shapes keep their own colour unless edited.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                COLOR_PALETTE.chunked(5).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(top = 10.dp)) {
+                        row.forEach { color ->
+                            val selected = current == color
+                            Box(
+                                Modifier.size(36.dp).clip(CircleShape).background(color)
+                                    .border(if (selected) 3.dp else 1.dp, if (selected) Color.Black else Color.Gray, CircleShape)
+                                    .clickable { onPick(color) }
+                            )
+                        }
+                    }
+                }
+                TextButton(onClick = { onPick(null) }, modifier = Modifier.padding(top = 8.dp)) {
+                    Text("Use default" + if (current == null) " (current)" else "")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } }
     )
 }
 
@@ -1747,6 +1831,7 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
             var text by remember {
                 mutableStateOf(if (shape.realLength > 0) trimNum(mmToDisplay(shape.realLength, unitLabel)) else "")
             }
+            var pickedColor by remember { mutableStateOf(shape.color?.let { Color(it) }) }
             var showHandwrite by remember { mutableStateOf(false) }
             if (showHandwrite) {
                 HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
@@ -1763,13 +1848,15 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                             modifier = Modifier.fillMaxWidth()
                         )
                         TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                        ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         val v = text.toDoubleOrNull()
-                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true))
-                        else onConfirm(shape.copy(confirmed = false))
+                        val colorArgb = pickedColor?.toArgb()
+                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb))
+                        else onConfirm(shape.copy(confirmed = false, color = colorArgb))
                     }) { Text("Confirm") }
                 },
                 dismissButton = {
@@ -1788,11 +1875,33 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                     else -> "Text label"
                 },
                 initial = shape.label,
-                onConfirm = { onConfirm(shape.copy(label = it)) },
+                initialColor = shape.color?.let { Color(it) },
+                showColorPicker = true,
+                onConfirm = { text, color -> onConfirm(shape.copy(label = text, color = color?.toArgb())) },
                 onDelete = onDelete,
                 onDismiss = onDismiss
             )
         }
+    }
+}
+
+/** Palette + "default" swatch shared by the draw-colour picker and every shape edit dialog. */
+@Composable
+private fun ColorSwatchRow(current: Color?, onPick: (Color?) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 8.dp)) {
+        COLOR_PALETTE.forEach { color ->
+            val selected = current == color
+            Box(
+                Modifier.size(28.dp).clip(CircleShape).background(color)
+                    .border(if (selected) 3.dp else 1.dp, if (selected) Color.Black else Color.Gray, CircleShape)
+                    .clickable { onPick(color) }
+            )
+        }
+        Box(
+            Modifier.size(28.dp).clip(CircleShape).background(Color.LightGray)
+                .border(if (current == null) 3.dp else 1.dp, if (current == null) Color.Black else Color.Gray, CircleShape)
+                .clickable { onPick(null) }
+        )
     }
 }
 
@@ -1881,11 +1990,14 @@ private fun RoomPlanDialog(
 private fun LabelInputDialog(
     title: String,
     initial: String,
-    onConfirm: (String) -> Unit,
+    initialColor: Color? = null,
+    showColorPicker: Boolean = false,
+    onConfirm: (text: String, color: Color?) -> Unit,
     onDelete: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var text by remember { mutableStateOf(initial) }
+    var pickedColor by remember { mutableStateOf(initialColor) }
     var showHandwrite by remember { mutableStateOf(false) }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
@@ -1897,9 +2009,12 @@ private fun LabelInputDialog(
             Column {
                 OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                if (showColorPicker) {
+                    ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("Save") } },
+        confirmButton = { TextButton(onClick = { onConfirm(text, pickedColor) }) { Text("Save") } },
         dismissButton = {
             Row {
                 if (onDelete != null) TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }

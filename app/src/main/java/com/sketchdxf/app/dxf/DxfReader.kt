@@ -64,19 +64,23 @@ object DxfReader {
                         j++
                     }
                     fun d(groupCode: Int): Double = fields[groupCode]?.getOrNull(0)?.toDoubleOrNull() ?: 0.0
+                    // Group 420 is a 24-bit true colour (0x00RRGGBB, no alpha channel) — OR in full
+                    // opacity so it's a valid ARGB int for Compose/Android's Color.
+                    val color = fields[420]?.getOrNull(0)?.toIntOrNull()?.let { (it and 0x00FFFFFF) or 0xFF000000.toInt() }
                     when (value) {
                         "LINE" -> shapes.add(
                             SketchShape(
                                 workId = 0, kind = ShapeKind.LINE,
                                 x1 = (d(10) * mmPerUnit).toFloat(), y1 = (d(20) * mmPerUnit).toFloat(),
-                                x2 = (d(11) * mmPerUnit).toFloat(), y2 = (d(21) * mmPerUnit).toFloat()
+                                x2 = (d(11) * mmPerUnit).toFloat(), y2 = (d(21) * mmPerUnit).toFloat(),
+                                color = color
                             )
                         )
                         "CIRCLE" -> shapes.add(
                             SketchShape(
                                 workId = 0, kind = ShapeKind.CIRCLE,
                                 cx = (d(10) * mmPerUnit).toFloat(), cy = (d(20) * mmPerUnit).toFloat(),
-                                r = (d(40) * mmPerUnit).toFloat()
+                                r = (d(40) * mmPerUnit).toFloat(), color = color
                             )
                         )
                         "ARC" -> {
@@ -87,7 +91,8 @@ object DxfReader {
                                     workId = 0, kind = ShapeKind.ARC,
                                     cx = cx.toFloat(), cy = cy.toFloat(), r = r.toFloat(),
                                     x1 = (cx + r * cos(startRad)).toFloat(), y1 = (cy + r * sin(startRad)).toFloat(),
-                                    x2 = (cx + r * cos(endRad)).toFloat(), y2 = (cy + r * sin(endRad)).toFloat()
+                                    x2 = (cx + r * cos(endRad)).toFloat(), y2 = (cy + r * sin(endRad)).toFloat(),
+                                    color = color
                                 )
                             )
                         }
@@ -98,7 +103,7 @@ object DxfReader {
                                     SketchShape(
                                         workId = 0, kind = ShapeKind.TEXT,
                                         x1 = (d(10) * mmPerUnit).toFloat(), y1 = (d(20) * mmPerUnit).toFloat(),
-                                        label = label
+                                        label = label, color = color
                                     )
                                 )
                             }
