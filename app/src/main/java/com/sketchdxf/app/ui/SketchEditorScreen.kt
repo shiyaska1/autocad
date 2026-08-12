@@ -20,6 +20,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.ShowChart
@@ -234,6 +237,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // colour automatically, since .copy() only overrides fields explicitly passed to it.
     var currentColor by remember { mutableStateOf<Color?>(null) }
     var showColorPicker by remember { mutableStateOf(false) }
+    // Fullscreen canvas: hides the toolbars/command line so the drawing area fills the screen; a
+    // corner button (drawn over the canvas itself, since the top bar is hidden too) exits back.
+    var fullscreenCanvas by remember { mutableStateOf(false) }
 
     // AutoCAD-style command line: type a tool's name/alias and press Enter/Run to switch to it —
     // a keyboard-first shortcut alongside the toolbar chips. A leading ' marks a "transparent"
@@ -1106,28 +1112,32 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    OutlinedTextField(
-                        value = name, onValueChange = { name = it }, singleLine = true,
-                        label = { Text("Name") }, modifier = Modifier.fillMaxWidth()
+            if (!fullscreenCanvas) {
+                TopAppBar(
+                    title = {
+                        OutlinedTextField(
+                            value = name, onValueChange = { name = it }, singleLine = true,
+                            label = { Text("Name") }, modifier = Modifier.fillMaxWidth()
+                        )
+                    },
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    actions = {
+                        IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
+                        IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
+                        IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
+                        IconButton(onClick = { fullscreenCanvas = true }) { Icon(Icons.Filled.Fullscreen, "Fullscreen canvas") }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimary,
+                        navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
                     )
-                },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                actions = {
-                    IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
-                    IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
-                    IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary
                 )
-            )
+            }
         }
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
+        Column(Modifier.fillMaxSize().padding(if (fullscreenCanvas) PaddingValues(0.dp) else pad).padding(if (fullscreenCanvas) 0.dp else 12.dp)) {
+            if (!fullscreenCanvas) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1274,9 +1284,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(vertical = 6.dp)
             )
+            }
 
             Box(
-                Modifier.fillMaxWidth().aspectRatio(3f / 4f)
+                (if (fullscreenCanvas) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(3f / 4f))
                     // Zoomed-in content is scaled via graphicsLayer below, which doesn't clip by
                     // default — without this, zooming in pushes the (invisible) touch region of
                     // the canvas up over the toolbar, and its buttons stop receiving taps.
@@ -1761,8 +1772,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                     }
                 }
+                if (fullscreenCanvas) {
+                    IconButton(
+                        onClick = { fullscreenCanvas = false },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                            .background(Color.White.copy(alpha = 0.85f), CircleShape)
+                    ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
+                }
             }
 
+            if (!fullscreenCanvas) {
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Command line", style = MaterialTheme.typography.bodySmall,
@@ -1796,6 +1815,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 Button(onClick = { save() }, enabled = !busy && loaded, modifier = Modifier.weight(1f)) {
                     Text(if (busy) "Saving…" else "Save")
                 }
+            }
             }
         }
     }
