@@ -354,6 +354,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Block library: save a selection as a reusable, categorised group of shapes, then drop it
     // back in elsewhere — see SketchBlock/SketchBlockCodec.
     var showSaveBlockDialog by remember { mutableStateOf(false) }
+    var showGroupWidthDialog by remember { mutableStateOf(false) }
     var showBlockPicker by remember { mutableStateOf(false) }
     var pendingBlockInsert by remember { mutableStateOf<SketchBlock?>(null) }
     var insertUseRatio by remember { mutableStateOf(true) }
@@ -587,6 +588,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         shapes.addAll(newLines)
         selectedIndices.clear()
         selectedIndices.addAll(firstNewIndex until shapes.size)
+    }
+
+    /** Applies one line width (px) to every selected shape that draws a stroke — everything
+     *  except TEXT, which has its own separate font-size control. 0 clears back to each shape
+     *  kind's usual default width instead of setting an explicit one. */
+    fun applyGroupWidth(widthPx: Float) {
+        val targets = selectedIndices.filter { shapes.getOrNull(it)?.kind != ShapeKind.TEXT }
+        if (targets.isEmpty()) return
+        pushUndo()
+        targets.forEach { idx -> shapes[idx] = shapes[idx].copy(strokeWidth = widthPx) }
     }
 
     /** Creates the offset copy immediately, using the perpendicular distance from [sidePoint]
@@ -1221,6 +1232,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { showSaveBlockDialog = false }
         )
     }
+    if (showGroupWidthDialog) {
+        GroupWidthDialog(
+            onConfirm = { widthPx -> applyGroupWidth(widthPx); showGroupWidthDialog = false },
+            onCancel = { showGroupWidthDialog = false }
+        )
+    }
     if (showBlockPicker) {
         BlockPickerDialog(
             blocks = savedBlocks,
@@ -1466,6 +1483,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
                         FilterChip(selected = false, onClick = { explodeSelection() }, label = { Text("Explode") })
                     }
+                    FilterChip(selected = false, onClick = { showGroupWidthDialog = true }, label = { Text("Width") })
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
                     FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
                 }
@@ -2343,6 +2361,40 @@ private fun LineFinishDialog(
             }) { Text("Apply") }
         },
         dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as tapped") } }
+    )
+}
+
+/** Asked from Box Select's "Width" action: applies one line width (px) to every selected shape
+ *  at once, instead of having to open each one's own edit dialog individually. */
+@Composable
+private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Line width for selection") },
+        text = {
+            Column {
+                Text(
+                    "Applies to every selected line, circle, arc, polyline and dimension (not text, which has its own font size).",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Width (px)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toFloatOrNull()
+                if (v == null || v <= 0f) error = "Enter a valid width" else onConfirm(v)
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
 }
 
