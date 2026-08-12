@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.ShapeKind
+import com.sketchdxf.app.data.SketchArc
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
@@ -131,7 +132,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET }
 private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
 
 /**
@@ -251,6 +252,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var moveDragStart by remember { mutableStateOf<Offset?>(null) }
     var moveDragCurrent by remember { mutableStateOf<Offset?>(null) }
 
+    // Break: tap the line, tap the first break point, tap the second — the segment between the
+    // two (projected onto the line) is removed. Tapping both points at nearly the same spot
+    // leaves no visible gap, matching AutoCAD's "break at point".
+    var breakLineIndex by remember { mutableStateOf(-1) }
+    var breakPoint1 by remember { mutableStateOf<Offset?>(null) }
+
+    // Fillet: tap the first line, tap the second, then type a radius — 0 makes them meet at a
+    // sharp corner; a positive radius rounds the corner with a tangent arc of that radius.
+    var filletIndex1 by remember { mutableStateOf(-1) }
+    var filletIndex2 by remember { mutableStateOf(-1) }
+    var filletTap1 by remember { mutableStateOf<Offset?>(null) }
+    var filletTap2 by remember { mutableStateOf<Offset?>(null) }
+    var filletError by remember { mutableStateOf<String?>(null) }
+
     fun resetToolState() {
         lineStartPoint = null
         offsetLineIndex = -1
@@ -260,6 +275,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         selectedIndices.clear()
         selectDragStart = null; selectDragCurrent = null
         moveModeActive = false; moveDragStart = null; moveDragCurrent = null
+        breakLineIndex = -1; breakPoint1 = null
+        filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
     }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
@@ -304,6 +321,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return best
     }
 
+    /** Points sampled along an ARC shape's actual (minor) sweep — used for hit-testing, bounds,
+     *  and the box-select move-preview ghost, the same way FREEHAND uses its stored path. */
+    fun arcPoints(s: SketchShape, steps: Int = 16): List<Offset> {
+        val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+        return (0..steps).map { i ->
+            val ang = Math.toRadians((startDeg + sweepDeg * i / steps).toDouble())
+            Offset(s.cx + s.r * cos(ang).toFloat(), s.cy + s.r * sin(ang).toFloat())
+        }
+    }
+
     fun hitTest(p: Offset): Int {
         var best = -1; var bestDist = 26f
         shapes.forEachIndexed { i, s ->
@@ -318,6 +345,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     else pts.zipWithNext { a, b -> distToSegment(p, Offset(a.first, a.second), Offset(b.first, b.second)) }
                         .minOrNull() ?: Float.MAX_VALUE
                 }
+                ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
@@ -336,6 +364,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 pts.minOf { it.first }, pts.minOf { it.second }, pts.maxOf { it.first }, pts.maxOf { it.second }
             )
         }
+        ShapeKind.ARC -> {
+            val pts = arcPoints(s)
+            androidx.compose.ui.geometry.Rect(pts.minOf { it.x }, pts.minOf { it.y }, pts.maxOf { it.x }, pts.maxOf { it.y })
+        }
         else -> androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
     }
 
@@ -344,6 +376,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
         ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
         ShapeKind.FREEHAND -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
+        ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
         else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
     }
 
@@ -419,6 +452,84 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
         }
         trimBoundaryIndex = -1; trimTargetIndex = -1
+    }
+
+    /** Splits the line at the two (projected, clamped-to-segment) break points, removing the
+     *  segment between them. Tapping both points at nearly the same spot leaves no visible gap. */
+    fun performBreak(lineIdx: Int, p1: Offset, p2: Offset) {
+        val line = shapes.getOrNull(lineIdx) ?: return
+        val a = Offset(line.x1, line.y1); val b = Offset(line.x2, line.y2)
+        var t1 = projectParam(a, b, p1).coerceIn(0f, 1f)
+        var t2 = projectParam(a, b, p2).coerceIn(0f, 1f)
+        if (t1 > t2) { val tmp = t1; t1 = t2; t2 = tmp }
+        val pLo = Offset(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1)
+        val pHi = Offset(a.x + (b.x - a.x) * t2, a.y + (b.y - a.y) * t2)
+        val keepFirst = t1 > 0.02f
+        val keepSecond = t2 < 0.98f
+        pushUndo()
+        val pieces = mutableListOf<SketchShape>()
+        // A break shortens the line, so any prior confirmed length no longer applies — the
+        // pieces start unconfirmed until re-dimensioned, same as a freshly drawn line.
+        if (keepFirst) pieces.add(line.copy(x2 = pLo.x, y2 = pLo.y, confirmed = false, realLength = 0.0))
+        if (keepSecond) pieces.add(line.copy(x1 = pHi.x, y1 = pHi.y, confirmed = false, realLength = 0.0))
+        shapes.removeAt(lineIdx)
+        shapes.addAll(pieces)
+    }
+
+    /** Joins two lines at their intersection: radius 0 trims/extends both to meet at a sharp
+     *  corner; a positive radius trims each back to its tangent point and adds a connecting ARC.
+     *  [near1]/[near2] (the tap points that picked each line) identify which end of each line is
+     *  at this corner — the other end is left untouched. Returns an error message, or null on success. */
+    fun performFillet(idx1: Int, idx2: Int, radiusPx: Float, near1: Offset, near2: Offset): String? {
+        val l1 = shapes.getOrNull(idx1) ?: return "That line no longer exists"
+        val l2 = shapes.getOrNull(idx2) ?: return "That line no longer exists"
+        val inter = lineIntersection(l1, l2) ?: return "Those lines are parallel — no corner to fillet"
+
+        fun nearEndIsFirst(s: SketchShape, tap: Offset) =
+            hypotF(tap.x - s.x1, tap.y - s.y1) <= hypotF(tap.x - s.x2, tap.y - s.y2)
+        val l1NearFirst = nearEndIsFirst(l1, near1)
+        val l2NearFirst = nearEndIsFirst(l2, near2)
+        val l1Far = if (l1NearFirst) Offset(l1.x2, l1.y2) else Offset(l1.x1, l1.y1)
+        val l2Far = if (l2NearFirst) Offset(l2.x2, l2.y2) else Offset(l2.x1, l2.y1)
+        val d1 = Offset(l1Far.x - inter.x, l1Far.y - inter.y); val len1 = hypotF(d1.x, d1.y)
+        val d2 = Offset(l2Far.x - inter.x, l2Far.y - inter.y); val len2 = hypotF(d2.x, d2.y)
+        if (len1 < 1e-3f || len2 < 1e-3f) return "That corner is right at a line's other endpoint"
+        val u1 = Offset(d1.x / len1, d1.y / len1)
+        val u2 = Offset(d2.x / len2, d2.y / len2)
+
+        if (radiusPx <= 0.5f) {
+            pushUndo()
+            shapes[idx1] = if (l1NearFirst) l1.copy(x1 = inter.x, y1 = inter.y) else l1.copy(x2 = inter.x, y2 = inter.y)
+            shapes[idx2] = if (l2NearFirst) l2.copy(x1 = inter.x, y1 = inter.y) else l2.copy(x2 = inter.x, y2 = inter.y)
+            return null
+        }
+
+        val cosTheta = (u1.x * u2.x + u1.y * u2.y).coerceIn(-1f, 1f)
+        val theta = acos(cosTheta.toDouble())
+        if (theta < 0.02 || theta > Math.PI - 0.02) return "Lines are almost parallel here — try radius 0 for a sharp corner"
+        val tanLen = (radiusPx / tan(theta / 2.0)).toFloat()
+        val clampedTanLen = tanLen.coerceAtMost(minOf(len1, len2) * 0.95f)
+        if (clampedTanLen < 1f) return "Radius is too large for these lines"
+        val effectiveRadius = clampedTanLen * tan(theta / 2.0).toFloat()
+        val t1 = Offset(inter.x + u1.x * clampedTanLen, inter.y + u1.y * clampedTanLen)
+        val t2 = Offset(inter.x + u2.x * clampedTanLen, inter.y + u2.y * clampedTanLen)
+        val bisector = Offset(u1.x + u2.x, u1.y + u2.y)
+        val bisLen = hypotF(bisector.x, bisector.y)
+        if (bisLen < 1e-3f) return "Lines point almost opposite ways here — try radius 0 for a sharp corner"
+        val bisUnit = Offset(bisector.x / bisLen, bisector.y / bisLen)
+        val centerDist = (effectiveRadius / sin(theta / 2.0)).toFloat()
+        val arcCenter = Offset(inter.x + bisUnit.x * centerDist, inter.y + bisUnit.y * centerDist)
+
+        pushUndo()
+        shapes[idx1] = if (l1NearFirst) l1.copy(x1 = t1.x, y1 = t1.y) else l1.copy(x2 = t1.x, y2 = t1.y)
+        shapes[idx2] = if (l2NearFirst) l2.copy(x1 = t2.x, y1 = t2.y) else l2.copy(x2 = t2.x, y2 = t2.y)
+        shapes.add(
+            SketchShape(
+                workId = 0, kind = ShapeKind.ARC, cx = arcCenter.x, cy = arcCenter.y, r = effectiveRadius,
+                x1 = t1.x, y1 = t1.y, x2 = t2.x, y2 = t2.y
+            )
+        )
+        return null
     }
 
     val baseBitmap = remember(baseImagePath) {
@@ -663,6 +774,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { pendingDimension = null }
         )
     }
+    if (filletIndex1 >= 0 && filletIndex2 >= 0) {
+        FilletRadiusDialog(
+            error = filletError,
+            onConfirm = { radiusMm ->
+                val p1 = filletTap1; val p2 = filletTap2
+                if (p1 != null && p2 != null) {
+                    val err = performFillet(filletIndex1, filletIndex2, (radiusMm * currentPxPerMm()).toFloat(), p1, p2)
+                    if (err == null) resetToolState() else filletError = err
+                }
+            },
+            onDismiss = { resetToolState() }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -728,6 +852,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.BOX_SELECT, onClick = {
                     tool = Tool.BOX_SELECT; resetToolState()
                 }, label = { Text("Box") })
+                FilterChip(selected = tool == Tool.BREAK, onClick = {
+                    tool = Tool.BREAK; resetToolState()
+                }, label = { Text("Break") })
+                FilterChip(selected = tool == Tool.FILLET, onClick = {
+                    tool = Tool.FILLET; resetToolState()
+                }, label = { Text("Fillet") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
             }
@@ -777,6 +907,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
                     tool == Tool.BOX_SELECT -> "${selectedIndices.size} selected — Move, Copy or Delete below, or drag a new box"
+                    tool == Tool.BREAK && breakLineIndex < 0 -> "Tap the line to break"
+                    tool == Tool.BREAK && breakPoint1 == null -> "Tap the first break point"
+                    tool == Tool.BREAK -> "Tap the second break point"
+                    tool == Tool.FILLET && filletIndex1 < 0 -> "Tap the first line"
+                    tool == Tool.FILLET && filletIndex2 < 0 -> "Tap the second line"
+                    tool == Tool.FILLET -> "Enter the fillet radius"
                     else -> "Pinch to zoom, drag to pan"
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -978,6 +1114,32 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                     )
                                 }
+                                Tool.BREAK -> detectTapGestures(onTap = { p ->
+                                    when {
+                                        breakLineIndex < 0 -> {
+                                            val idx = hitTestLine(p)
+                                            if (idx >= 0) breakLineIndex = idx
+                                        }
+                                        breakPoint1 == null -> breakPoint1 = p
+                                        else -> {
+                                            performBreak(breakLineIndex, breakPoint1!!, p)
+                                            breakLineIndex = -1; breakPoint1 = null
+                                        }
+                                    }
+                                })
+                                Tool.FILLET -> detectTapGestures(onTap = { p ->
+                                    when {
+                                        filletIndex1 < 0 -> {
+                                            val idx = hitTestLine(p)
+                                            if (idx >= 0) { filletIndex1 = idx; filletTap1 = p }
+                                        }
+                                        filletIndex2 < 0 -> {
+                                            val idx = hitTestLine(p)
+                                            if (idx >= 0 && idx != filletIndex1) { filletIndex2 = idx; filletTap2 = p }
+                                        }
+                                        else -> {}
+                                    }
+                                })
                             }
                         }
                     ) {
@@ -999,7 +1161,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
                         val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
                         shapes.forEachIndexed { i, s ->
-                            val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex || i in selectedIndices
+                            val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex ||
+                                i == breakLineIndex || i == filletIndex1 || i == filletIndex2 || i in selectedIndices
                             when (s.kind) {
                                 ShapeKind.LINE -> {
                                     // Confirmed lines just turn green — no automatic length label; a
@@ -1022,6 +1185,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     SketchPath.parse(s.path).zipWithNext { a, b ->
                                         drawLine(strokeColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = strokeWidth)
                                     }
+                                }
+                                ShapeKind.ARC -> {
+                                    val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+                                    drawArc(
+                                        color = if (isHighlighted) highlightPaint else linePaint,
+                                        startAngle = startDeg, sweepAngle = sweepDeg, useCenter = false,
+                                        topLeft = Offset(s.cx - s.r, s.cy - s.r),
+                                        size = androidx.compose.ui.geometry.Size(s.r * 2f, s.r * 2f),
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = if (isHighlighted) 7f else 5f)
+                                    )
                                 }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = if (isHighlighted) highlightPaint else Color(0xFF6A1B9A)
@@ -1062,6 +1235,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         dimStartPoint?.let { p ->
                             drawCircle(Color(0xFF6A1B9A), radius = 8f, center = p)
                         }
+                        breakPoint1?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
+                        filletTap1?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
+                        filletTap2?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
                             freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
                         }
@@ -1080,6 +1262,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             ShapeKind.FREEHAND -> SketchPath.parse(sh.path).zipWithNext { a, b ->
                                                 drawLine(Color.Gray, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
                                             }
+                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
                                             ShapeKind.TEXT -> drawCircle(Color.Gray, radius = 6f, center = Offset(sh.x1, sh.y1))
                                             else -> drawLine(Color.Gray, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = 4f)
                                         }
@@ -1141,6 +1324,38 @@ private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit
         },
         confirmButton = { TextButton(onClick = { if (text.isNotBlank()) onConfirm(text) }) { Text("Add") } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/**
+ * Both lines are already picked; asks for the fillet radius. Stays open (showing [error]) if the
+ * geometry can't support that radius, so a different value can be tried without re-picking lines.
+ */
+@Composable
+private fun FilletRadiusDialog(error: String?, onConfirm: (radiusMm: Double) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("0") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Fillet radius") },
+        text = {
+            Column {
+                Text(
+                    "0 = a sharp corner, the lines just meet. A positive radius rounds the corner with an arc of that radius.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true,
+                    label = { Text("Radius (mm)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { text.toDoubleOrNull()?.let { if (it >= 0) onConfirm(it) } }) { Text("Fillet") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
 

@@ -39,12 +39,14 @@ object ShapeKind {
     const val DIMENSION = "DIMENSION"
     /** A hand-drawn (pencil) stroke: an arbitrary point path stored in [SketchShape.path]. */
     const val FREEHAND = "FREEHAND"
+    /** A fillet arc: centre (cx,cy) + radius r, boundary points x1,y1 / x2,y2 — see [SketchArc]. */
+    const val ARC = "ARC"
 }
 
 /**
  * One editable vector primitive inside a work's editor canvas — a line, circle, text label,
- * dimension, or freehand stroke. Coordinates are in the editor's own canvas-pixel space (see
- * SketchEditorScreen), not a physical unit; [realLength] (mm) is only meaningful once
+ * dimension, freehand stroke, or fillet arc. Coordinates are in the editor's own canvas-pixel
+ * space (see SketchEditorScreen), not a physical unit; [realLength] (mm) is only meaningful once
  * [confirmed] is set on a LINE.
  */
 @Entity(tableName = "sketch_shapes")
@@ -52,12 +54,16 @@ data class SketchShape(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val workId: Long,
     val kind: String,
+    /** ARC: one boundary point (with x2,y2 the other). */
     val x1: Float = 0f,
     val y1: Float = 0f,
+    /** ARC: the other boundary point. */
     val x2: Float = 0f,
     val y2: Float = 0f,
+    /** ARC: centre. */
     val cx: Float = 0f,
     val cy: Float = 0f,
+    /** ARC: radius. */
     val r: Float = 0f,
     val label: String = "",
     val realLength: Double = 0.0,
@@ -80,6 +86,29 @@ object SketchPath {
         }
 
     fun serialize(points: List<Pair<Float, Float>>): String = points.joinToString(";") { (x, y) -> "$x,$y" }
+}
+
+/** Pure-math helpers for an ARC shape: centre + radius + two boundary points, no stored angles. */
+object SketchArc {
+    /** Degrees of the point (px,py) around (cx,cy), atan2 convention (0° = +x axis). */
+    fun angleDeg(cx: Float, cy: Float, px: Float, py: Float): Float =
+        Math.toDegrees(kotlin.math.atan2((py - cy).toDouble(), (px - cx).toDouble())).toFloat()
+
+    /**
+     * (startAngleDeg, sweepDeg) for the SHORTER arc from (x1,y1) to (x2,y2) around the centre —
+     * sweep is in (-180, 180]. This is always the physically-correct fillet arc: a real corner's
+     * fillet sweep is `180° - theta` for the angle theta between the two lines (0° < theta < 180°),
+     * which is always the minor arc. Orientation-agnostic, so the same call works whether the
+     * caller's space is screen (Y-down) or DXF (Y-up).
+     */
+    fun minorSweep(cx: Float, cy: Float, x1: Float, y1: Float, x2: Float, y2: Float): Pair<Float, Float> {
+        val a1 = angleDeg(cx, cy, x1, y1)
+        val a2 = angleDeg(cx, cy, x2, y2)
+        var sweep = (a2 - a1) % 360f
+        if (sweep > 180f) sweep -= 360f
+        if (sweep < -180f) sweep += 360f
+        return a1 to sweep
+    }
 }
 
 @Dao

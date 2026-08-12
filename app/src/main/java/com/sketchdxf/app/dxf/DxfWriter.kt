@@ -14,6 +14,7 @@ object DxfWriter {
         data class Line(val x1: Double, val y1: Double, val x2: Double, val y2: Double) : Entity()
         data class Circle(val cx: Double, val cy: Double, val r: Double) : Entity()
         data class Text(val x: Double, val y: Double, val height: Double, val value: String) : Entity()
+        data class Arc(val cx: Double, val cy: Double, val r: Double, val startAngle: Double, val endAngle: Double) : Entity()
     }
 
     /**
@@ -82,6 +83,21 @@ object DxfWriter {
                 ShapeKind.FREEHAND -> SketchPath.parse(s.path).zipWithNext { (ax, ay), (bx, by) ->
                     Entity.Line(sx(ax), sy(ay), sx(bx), sy(by))
                 }
+                ShapeKind.ARC -> {
+                    // Recompute the sweep in DXF's own (Y-flipped) space rather than reusing the
+                    // screen-space one — a Y-flip reverses angular orientation, and DXF's ARC always
+                    // sweeps counter-clockwise from angle 50 to 51, so start/end may need swapping.
+                    val dxfCx = sx(s.cx); val dxfCy = sy(s.cy); val dxfR = s.r * scale
+                    val dxfX1 = sx(s.x1); val dxfY1 = sy(s.y1); val dxfX2 = sx(s.x2); val dxfY2 = sy(s.y2)
+                    val a1 = Math.toDegrees(kotlin.math.atan2(dxfY1 - dxfCy, dxfX1 - dxfCx))
+                    val a2 = Math.toDegrees(kotlin.math.atan2(dxfY2 - dxfCy, dxfX2 - dxfCx))
+                    var sweep = (a2 - a1) % 360.0
+                    if (sweep > 180.0) sweep -= 360.0
+                    if (sweep < -180.0) sweep += 360.0
+                    val (start50, end51) = if (sweep >= 0.0) a1 to (a1 + sweep) else (a1 + sweep) to a1
+                    fun norm360(d: Double) = ((d % 360.0) + 360.0) % 360.0
+                    listOf(Entity.Arc(dxfCx, dxfCy, dxfR, norm360(start50), norm360(end51)))
+                }
                 else -> emptyList()
             }
         }
@@ -114,6 +130,12 @@ object DxfWriter {
                     code(10, e.x); code(20, e.y); code(30, 0.0)
                     code(40, e.height)
                     code(1, e.value)
+                }
+                is Entity.Arc -> {
+                    code(0, "ARC"); code(8, "0")
+                    code(10, e.cx); code(20, e.cy); code(30, 0.0)
+                    code(40, e.r)
+                    code(50, e.startAngle); code(51, e.endAngle)
                 }
             }
         }

@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import com.sketchdxf.app.data.ShapeKind
+import com.sketchdxf.app.data.SketchArc
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import java.io.File
@@ -45,6 +47,10 @@ object PreviewRenderer {
                     minX = min(minX, x); maxX = max(maxX, x)
                     minY = min(minY, y); maxY = max(maxY, y)
                 }
+                ShapeKind.ARC -> {
+                    minX = min(minX, s.cx - s.r); maxX = max(maxX, s.cx + s.r)
+                    minY = min(minY, s.cy - s.r); maxY = max(maxY, s.cy + s.r)
+                }
             }
         }
         val w = (maxX - minX).coerceAtLeast(1f)
@@ -82,6 +88,11 @@ object PreviewRenderer {
                 ShapeKind.FREEHAND -> {
                     val pts = SketchPath.parse(s.path)
                     pts.zipWithNext { (ax, ay), (bx, by) -> canvas.drawLine(px(ax), py(ay), px(bx), py(by), linePaint) }
+                }
+                ShapeKind.ARC -> {
+                    val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+                    val oval = RectF(px(s.cx - s.r), py(s.cy - s.r), px(s.cx + s.r), py(s.cy + s.r))
+                    canvas.drawArc(oval, startDeg, sweepDeg, false, linePaint)
                 }
             }
         }
