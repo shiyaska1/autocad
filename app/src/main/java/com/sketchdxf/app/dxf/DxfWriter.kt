@@ -16,6 +16,7 @@ object DxfWriter {
         data class Circle(val cx: Double, val cy: Double, val r: Double, override val color: Int? = null) : Entity()
         data class Text(val x: Double, val y: Double, val height: Double, val value: String, override val color: Int? = null) : Entity()
         data class Arc(val cx: Double, val cy: Double, val r: Double, val startAngle: Double, val endAngle: Double, override val color: Int? = null) : Entity()
+        data class Polyline(val points: List<Pair<Double, Double>>, override val color: Int? = null) : Entity()
     }
 
     /**
@@ -47,7 +48,7 @@ object DxfWriter {
         // Flip Y (screen space grows downward, DXF space grows upward) around the drawing's
         // own top edge, so the exported drawing isn't mirrored vertically.
         val maxY = shapes.maxOf { s ->
-            val pathMaxY = if (s.kind == ShapeKind.FREEHAND) {
+            val pathMaxY = if (s.kind == ShapeKind.FREEHAND || s.kind == ShapeKind.POLYLINE) {
                 SketchPath.parse(s.path).maxOfOrNull { it.second } ?: Float.NEGATIVE_INFINITY
             } else Float.NEGATIVE_INFINITY
             maxOf(s.y1, s.y2, s.cy + s.r, pathMaxY)
@@ -83,6 +84,10 @@ object DxfWriter {
                 }
                 ShapeKind.FREEHAND -> SketchPath.parse(s.path).zipWithNext { (ax, ay), (bx, by) ->
                     Entity.Line(sx(ax), sy(ay), sx(bx), sy(by), s.color)
+                }
+                ShapeKind.POLYLINE -> {
+                    val pts = SketchPath.parse(s.path).map { (x, y) -> sx(x) to sy(y) }
+                    if (pts.size >= 2) listOf(Entity.Polyline(pts, s.color)) else emptyList()
                 }
                 ShapeKind.ARC -> {
                     // Recompute the sweep in DXF's own (Y-flipped) space rather than reusing the
@@ -141,6 +146,12 @@ object DxfWriter {
                     code(10, e.cx); code(20, e.cy); code(30, 0.0)
                     code(40, e.r)
                     code(50, e.startAngle); code(51, e.endAngle)
+                }
+                is Entity.Polyline -> {
+                    code(0, "LWPOLYLINE"); code(8, "0"); colorCode(e.color)
+                    code(90, e.points.size) // vertex count
+                    code(70, "0") // 0 = open polyline (not closed)
+                    e.points.forEach { (x, y) -> code(10, x); code(20, y) }
                 }
             }
         }

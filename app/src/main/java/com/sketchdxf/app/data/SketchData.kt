@@ -45,6 +45,10 @@ object ShapeKind {
     const val FREEHAND = "FREEHAND"
     /** A fillet arc: centre (cx,cy) + radius r, boundary points x1,y1 / x2,y2 — see [SketchArc]. */
     const val ARC = "ARC"
+    /** A cleaned-up FREEHAND stroke: same [SketchShape.path] point list, but exported to DXF as
+     *  one true LWPOLYLINE entity instead of a chain of separate LINE segments — see
+     *  SketchEditorScreen's "Convert to Polyline" action and [SketchCircleFit]. */
+    const val POLYLINE = "POLYLINE"
 }
 
 /**
@@ -115,6 +119,27 @@ object SketchArc {
         if (sweep > 180f) sweep -= 360f
         if (sweep < -180f) sweep += 360f
         return a1 to sweep
+    }
+}
+
+/** Recognises a hand-drawn circle: a closed loop that stays roughly the same distance from its
+ *  own centroid the whole way round. Used by "Convert to Polyline" to turn a freehand stroke
+ *  that's clearly meant as a circle into a real CIRCLE instead of a jagged polyline. */
+object SketchCircleFit {
+    /** (cx, cy, r) if [points] look like a circle, else null. */
+    fun tryFit(points: List<Pair<Float, Float>>): Triple<Float, Float, Float>? {
+        if (points.size < 8) return null
+        val cx = points.map { it.first }.average().toFloat()
+        val cy = points.map { it.second }.average().toFloat()
+        val radii = points.map { kotlin.math.hypot((it.first - cx).toDouble(), (it.second - cy).toDouble()) }
+        val meanR = radii.average()
+        if (meanR < 4.0) return null // too small to meaningfully judge roundness
+        val variance = radii.sumOf { (it - meanR) * (it - meanR) } / radii.size
+        val relDeviation = kotlin.math.sqrt(variance) / meanR
+        val first = points.first(); val last = points.last()
+        val closureGap = kotlin.math.hypot((first.first - last.first).toDouble(), (first.second - last.second).toDouble())
+        val closed = closureGap < meanR * 0.35
+        return if (relDeviation < 0.18 && closed) Triple(cx, cy, meanR.toFloat()) else null
     }
 }
 

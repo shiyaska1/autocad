@@ -43,7 +43,7 @@ object PreviewRenderer {
                     minX = min(minX, min(s.x1, s.x2)); maxX = max(maxX, max(s.x1, s.x2))
                     minY = min(minY, min(s.y1, s.y2)); maxY = max(maxY, max(s.y1, s.y2))
                 }
-                ShapeKind.FREEHAND -> SketchPath.parse(s.path).forEach { (x, y) ->
+                ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(s.path).forEach { (x, y) ->
                     minX = min(minX, x); maxX = max(maxX, x)
                     minY = min(minY, y); maxY = max(maxY, y)
                 }
@@ -89,7 +89,7 @@ object PreviewRenderer {
                         canvas.drawText(s.label, mx + 4f, my - 4f, Paint(dimPaint).apply { textSize = dimTextSize })
                     }
                 }
-                ShapeKind.FREEHAND -> {
+                ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
                     val paint = paintFor(s, linePaint)
                     pts.zipWithNext { (ax, ay), (bx, by) -> canvas.drawLine(px(ax), py(ay), px(bx), py(by), paint) }

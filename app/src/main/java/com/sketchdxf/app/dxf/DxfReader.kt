@@ -1,6 +1,7 @@
 package com.sketchdxf.app.dxf
 
 import com.sketchdxf.app.data.ShapeKind
+import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import java.io.File
 import kotlin.math.cos
@@ -8,10 +9,11 @@ import kotlin.math.sin
 
 /**
  * A minimal DXF reader, symmetric to [DxfWriter]: understands the same entity subset that writer
- * produces (LINE, CIRCLE, ARC, TEXT), so an externally-authored DXF built from those primitives
- * — or one this app exported earlier — imports cleanly. Anything else (LWPOLYLINE, SPLINE,
- * DIMENSION, BLOCK/INSERT, ...) is silently skipped rather than erroring, so a more complex
- * external file just imports the parts this app understands, reported via [Result.skippedTypes].
+ * produces (LINE, CIRCLE, ARC, TEXT, LWPOLYLINE), so an externally-authored DXF built from those
+ * primitives — or one this app exported earlier — imports cleanly. Anything else (SPLINE,
+ * DIMENSION, BLOCK/INSERT, old-style POLYLINE/VERTEX, ...) is silently skipped rather than
+ * erroring, so a more complex external file just imports the parts this app understands,
+ * reported via [Result.skippedTypes].
  *
  * Coordinates come back in the file's own space (millimetres, after applying \$INSUNITS if
  * present) — placing them into the editor's canvas-pixel space, including the Y-flip DXF's
@@ -105,6 +107,23 @@ object DxfReader {
                                         x1 = (d(10) * mmPerUnit).toFloat(), y1 = (d(20) * mmPerUnit).toFloat(),
                                         label = label, color = color
                                     )
+                                )
+                            }
+                        }
+                        "LWPOLYLINE" -> {
+                            // Vertices are inline 10/20 pairs, one of each per vertex in order —
+                            // unlike old-style POLYLINE, which uses separate VERTEX sub-entities
+                            // and isn't supported here.
+                            val xs = fields[10].orEmpty()
+                            val ys = fields[20].orEmpty()
+                            val pts = xs.zip(ys) { xStr, yStr ->
+                                val x = xStr.toDoubleOrNull() ?: 0.0
+                                val y = yStr.toDoubleOrNull() ?: 0.0
+                                (x * mmPerUnit).toFloat() to (y * mmPerUnit).toFloat()
+                            }
+                            if (pts.size >= 2) {
+                                shapes.add(
+                                    SketchShape(workId = 0, kind = ShapeKind.POLYLINE, path = SketchPath.serialize(pts), color = color)
                                 )
                             }
                         }

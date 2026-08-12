@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchArc
+import com.sketchdxf.app.data.SketchCircleFit
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
@@ -405,7 +406,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 ShapeKind.CIRCLE -> abs(hypotF(p.x - s.cx, p.y - s.cy) - s.r)
                 ShapeKind.TEXT -> hypotF(p.x - s.x1, p.y - s.y1)
                 ShapeKind.DIMENSION -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
-                ShapeKind.FREEHAND -> {
+                ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
                     if (pts.size < 2) Float.MAX_VALUE
                     else pts.zipWithNext { a, b -> distToSegment(p, Offset(a.first, a.second), Offset(b.first, b.second)) }
@@ -423,7 +424,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun shapeBounds(s: SketchShape): androidx.compose.ui.geometry.Rect = when (s.kind) {
         ShapeKind.CIRCLE -> androidx.compose.ui.geometry.Rect(s.cx - s.r, s.cy - s.r, s.cx + s.r, s.cy + s.r)
         ShapeKind.TEXT -> androidx.compose.ui.geometry.Rect(s.x1 - 12f, s.y1 - 12f, s.x1 + 12f, s.y1 + 12f)
-        ShapeKind.FREEHAND -> {
+        ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
             val pts = SketchPath.parse(s.path)
             if (pts.isEmpty()) androidx.compose.ui.geometry.Rect(s.x1, s.y1, s.x1, s.y1)
             else androidx.compose.ui.geometry.Rect(
@@ -441,7 +442,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun translateShape(s: SketchShape, dx: Float, dy: Float): SketchShape = when (s.kind) {
         ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
         ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
-        ShapeKind.FREEHAND -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
+        ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
         ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
         else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
     }
@@ -463,6 +464,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val copies = selectedIndices.sorted().map { translateShape(shapes[it], pasteOffsetPx, pasteOffsetPx) }
         selectedIndices.clear()
         copies.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+    }
+
+    /** Cleans up every selected FREEHAND stroke: one that's clearly meant as a circle (a closed
+     *  loop, roughly constant distance from its own centre) becomes a real CIRCLE; anything else
+     *  becomes a POLYLINE — same points, but exported to DXF as one true polyline entity instead
+     *  of a chain of separate LINE segments. Non-FREEHAND selected shapes are left untouched. */
+    fun convertFreehandSelection() {
+        val targets = selectedIndices.filter { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }
+        if (targets.isEmpty()) return
+        pushUndo()
+        targets.forEach { idx ->
+            val s = shapes[idx]
+            val pts = SketchPath.parse(s.path)
+            val fit = SketchCircleFit.tryFit(pts)
+            shapes[idx] = if (fit != null) {
+                val (cx, cy, r) = fit
+                s.copy(kind = ShapeKind.CIRCLE, cx = cx, cy = cy, r = r, path = "")
+            } else {
+                s.copy(kind = ShapeKind.POLYLINE)
+            }
+        }
     }
 
     /** Creates the offset copy immediately, using the perpendicular distance from [sidePoint]
@@ -782,7 +804,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (result == null) { dxfImportMessage = "That file doesn't look like a valid DXF"; return }
         if (result.shapes.isEmpty()) {
             dxfImportMessage = if (result.skippedTypes.isNotEmpty())
-                "No LINE/CIRCLE/ARC/TEXT entities found — only ${result.skippedTypes.joinToString()}, which isn't supported yet"
+                "No LINE/CIRCLE/ARC/TEXT/LWPOLYLINE entities found — only ${result.skippedTypes.joinToString()}, which isn't supported yet"
             else "No entities found in that file"
             return
         }
@@ -792,6 +814,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         result.shapes.forEach { s ->
             minX = minOf(minX, s.x1, s.x2, s.cx - s.r); maxX = maxOf(maxX, s.x1, s.x2, s.cx + s.r)
             minY = minOf(minY, s.y1, s.y2, s.cy - s.r); maxY = maxOf(maxY, s.y1, s.y2, s.cy + s.r)
+            if (s.kind == ShapeKind.POLYLINE) {
+                SketchPath.parse(s.path).forEach { (x, y) ->
+                    minX = minOf(minX, x); maxX = maxOf(maxX, x)
+                    minY = minOf(minY, y); maxY = maxOf(maxY, y)
+                }
+            }
         }
         val spanX = (maxX - minX).coerceAtLeast(1f); val spanY = (maxY - minY).coerceAtLeast(1f)
         val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
@@ -810,6 +838,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 ShapeKind.ARC -> s.copy(
                     cx = mapX(s.cx), cy = mapY(s.cy), r = s.r * fitScale,
                     x1 = mapX(s.x1), y1 = mapY(s.y1), x2 = mapX(s.x2), y2 = mapY(s.y2)
+                )
+                ShapeKind.POLYLINE -> s.copy(
+                    path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> mapX(x) to mapY(y) })
                 )
                 else -> { // LINE
                     val realLenMm = hypot((s.x2 - s.x1).toDouble(), (s.y2 - s.y1).toDouble())
@@ -1170,6 +1201,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     FilterChip(selected = moveModeActive, onClick = { moveModeActive = !moveModeActive }, label = { Text("Move") })
                     FilterChip(selected = false, onClick = { copySelection() }, label = { Text("Copy") })
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
+                    if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
+                        FilterChip(
+                            selected = false, onClick = { convertFreehandSelection() },
+                            label = { Text("Polyline") }
+                        )
+                    }
                     FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
                 }
             }
@@ -1540,7 +1577,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         textSize = 34f
                                     }
                                 )
-                                ShapeKind.FREEHAND -> {
+                                ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                                     val strokeColor = shapeColor(s, linePaint, isHighlighted)
                                     val strokeWidth = if (isHighlighted) 6f else 4f
                                     SketchPath.parse(s.path).zipWithNext { a, b ->
@@ -1623,7 +1660,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                 Color.Gray, radius = sh.r, center = Offset(sh.cx, sh.cy),
                                                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
                                             )
-                                            ShapeKind.FREEHAND -> SketchPath.parse(sh.path).zipWithNext { a, b ->
+                                            ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(sh.path).zipWithNext { a, b ->
                                                 drawLine(Color.Gray, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
                                             }
                                             ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
