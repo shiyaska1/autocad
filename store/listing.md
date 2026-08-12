@@ -51,7 +51,10 @@ REUSE YOUR OWN SYMBOLS
 
 IMPORT & EXPORT
 • Export a finished sketch as a DXF file, ready for AutoCAD
-• Import an existing DXF back onto the canvas to keep working on it
+• Import an existing DXF back onto the canvas to keep working on it —
+  including files built from blocks (doors, windows, fixtures placed as
+  AutoCAD block references), which come in fully placed and are added to
+  your own Block library automatically
 • Share or save the DXF straight from the app
 
 No account, no ads, no data collection — everything you draw stays on your
