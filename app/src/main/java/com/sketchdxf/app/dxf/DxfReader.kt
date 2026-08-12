@@ -100,7 +100,7 @@ object DxfReader {
                 if (label.isBlank()) null else SketchShape(
                     workId = 0, kind = ShapeKind.TEXT,
                     x1 = (d(10) * mmPerUnit).toFloat(), y1 = (d(20) * mmPerUnit).toFloat(),
-                    label = label, color = color
+                    label = label, color = color, fontSize = (d(40) * mmPerUnit).toFloat()
                 )
             }
             "LWPOLYLINE" -> {

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.TextFields
@@ -1043,10 +1044,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         LabelInputDialog(
             title = "Text label",
             initial = "",
-            onConfirm = { text, _ ->
+            showFontSize = true,
+            unitLabel = unit,
+            onConfirm = { text, _, fontSizeMm ->
                 if (text.isNotBlank()) {
                     pushUndo()
-                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb()))
+                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm))
                 }
                 pendingTextPos = null
             },
@@ -1411,6 +1414,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                     }
                 )
+            }
+            // Icon-sized and pinned right under the tools, not at the bottom of the screen — the
+            // full-width text buttons that used to live there could end up below the fold (or
+            // behind the keyboard) once the canvas was scrolled/zoomed, making Save hard to reach.
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
+                IconButton(onClick = onBack, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
+                IconButton(onClick = { save() }, enabled = !busy && loaded) {
+                    if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Filled.Save, "Save")
+                }
             }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
                 Row(
@@ -1874,7 +1887,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     s.label, s.x1, s.y1,
                                     android.graphics.Paint().apply {
                                         color = if (isHighlighted) 0xFFE65100.toInt() else (s.color ?: 0xFF6A1B9A.toInt())
-                                        textSize = 34f
+                                        textSize = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f
                                     }
                                 )
                                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
@@ -2062,12 +2075,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }
             }
 
-            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onBack, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
-                Button(onClick = { save() }, enabled = !busy && loaded, modifier = Modifier.weight(1f)) {
-                    Text(if (busy) "Saving…" else "Save")
-                }
-            }
             }
         }
     }
@@ -2539,7 +2546,12 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 initial = shape.label,
                 initialColor = shape.color?.let { Color(it) },
                 showColorPicker = true,
-                onConfirm = { text, color -> onConfirm(shape.copy(label = text, color = color?.toArgb())) },
+                showFontSize = shape.kind == ShapeKind.TEXT,
+                initialFontSizeMm = shape.fontSize,
+                unitLabel = unitLabel,
+                onConfirm = { text, color, fontSizeMm ->
+                    onConfirm(shape.copy(label = text, color = color?.toArgb(), fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize))
+                },
                 onDelete = onDelete,
                 onDismiss = onDismiss
             )
@@ -2654,13 +2666,19 @@ private fun LabelInputDialog(
     initial: String,
     initialColor: Color? = null,
     showColorPicker: Boolean = false,
-    onConfirm: (text: String, color: Color?) -> Unit,
+    showFontSize: Boolean = false,
+    initialFontSizeMm: Float = 0f,
+    unitLabel: String = "mm",
+    onConfirm: (text: String, color: Color?, fontSizeMm: Float) -> Unit,
     onDelete: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var text by remember { mutableStateOf(initial) }
     var pickedColor by remember { mutableStateOf(initialColor) }
     var showHandwrite by remember { mutableStateOf(false) }
+    var fontSizeText by remember {
+        mutableStateOf(if (initialFontSizeMm > 0f) trimNum(mmToDisplay(initialFontSizeMm.toDouble(), unitLabel)) else "")
+    }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
@@ -2674,9 +2692,22 @@ private fun LabelInputDialog(
                 if (showColorPicker) {
                     ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })
                 }
+                if (showFontSize) {
+                    OutlinedTextField(
+                        value = fontSizeText, onValueChange = { fontSizeText = it }, singleLine = true,
+                        label = { Text("Font size ($unitLabel) — optional") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text, pickedColor) }) { Text("Save") } },
+        confirmButton = {
+            TextButton(onClick = {
+                val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
+                onConfirm(text, pickedColor, fontSizeMm)
+            }) { Text("Save") }
+        },
         dismissButton = {
             Row {
                 if (onDelete != null) TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }

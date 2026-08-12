@@ -137,7 +137,13 @@ data class SketchShape(
      *  true draws the longer (major) one instead. Fillet/Extend-generated arcs are always minor
      *  (the default); a 3-point ARC tool pick can need either, decided by which side of the
      *  chord its middle point fell on — see [SketchArc.minorArcContains]. */
-    val major: Boolean = false
+    val major: Boolean = false,
+    /** TEXT/DIMENSION only: real-world label height in mm, or 0 to use the kind's usual fixed
+     *  on-screen size (unset — every shape saved before this existed reads back as 0, so old
+     *  labels keep looking exactly as they always did). Feeds both the on-canvas pixel size
+     *  (via currentPxPerMm()) and the exported DXF TEXT entity's height, so a size picked here
+     *  actually means something in AutoCAD too, not just on this screen. */
+    val fontSize: Float = 0f
 )
 
 /** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips
