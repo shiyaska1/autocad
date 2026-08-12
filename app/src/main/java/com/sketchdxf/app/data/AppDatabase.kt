@@ -55,17 +55,30 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        const val DB_FILE_NAME = "sketch_dxf.db"
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "sketch_dxf.db"
+                    DB_FILE_NAME
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }
+
+        /** Closes the open connection (checkpointing its WAL file) and drops the cached instance,
+         *  so the underlying .db file on disk is safe to read or overwrite — used by
+         *  [com.sketchdxf.app.data.BackupManager] around an export/import. [get] transparently
+         *  reopens a fresh connection the next time anything touches the database. */
+        fun closeAndReset() {
+            synchronized(this) {
+                INSTANCE?.close()
+                INSTANCE = null
+            }
+        }
     }
 }
