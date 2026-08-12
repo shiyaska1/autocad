@@ -234,6 +234,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var currentColor by remember { mutableStateOf<Color?>(null) }
     var showColorPicker by remember { mutableStateOf(false) }
 
+    // AutoCAD-style command line: type a tool's name/alias and press Enter/Run to switch to it —
+    // a keyboard-first shortcut alongside the toolbar chips. A leading ' marks a "transparent"
+    // command (e.g. 'ORTHO, 'SNAP): it runs without cancelling whatever tool/points are already
+    // in progress, the same way AutoCAD lets you pan or toggle a mode mid-command.
+    var commandInput by remember { mutableStateOf("") }
+    var commandFeedback by remember { mutableStateOf<String?>(null) }
+
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
@@ -992,6 +999,44 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (uri != null) importDxf(uri)
     }
 
+    fun runCommand(raw: String) {
+        val transparent = raw.trim().startsWith("'")
+        val cmd = raw.trim().removePrefix("'").uppercase()
+        commandInput = ""
+        if (cmd.isBlank()) return
+        // A normal command replaces whatever's active, same as AutoCAD starting a new command;
+        // a transparent one leaves the current tool/in-progress points alone.
+        if (!transparent) resetToolState()
+        var recognized = true
+        when (cmd) {
+            "L", "LINE" -> tool = Tool.LINE
+            "REC", "RECT", "RECTANGLE" -> tool = Tool.RECTANGLE
+            "C", "CIRCLE" -> tool = Tool.CIRCLE
+            "T", "TEXT", "TXT" -> tool = Tool.TEXT
+            "DIM", "DIMENSION" -> tool = Tool.DIMENSION
+            "O", "OFFSET" -> tool = Tool.OFFSET
+            "TR", "TRIM" -> tool = Tool.TRIM
+            "P", "PAN" -> tool = Tool.PAN
+            "FH", "FREEHAND", "PENCIL" -> tool = Tool.FREEHAND
+            "SEL", "SELECT", "S" -> tool = Tool.SELECT
+            "BOX", "WIN", "WINDOW" -> tool = Tool.BOX_SELECT
+            "BR", "BREAK" -> tool = Tool.BREAK
+            "F", "FILLET" -> tool = Tool.FILLET
+            "STR", "STRETCH" -> tool = Tool.STRETCH
+            "RP", "ROOMPLAN" -> showRoomPlan = true
+            "COL", "COLOR", "COLOUR" -> showColorPicker = true
+            "U", "UNDO" -> undo()
+            "RE", "REDO" -> redo()
+            "SAVE" -> save()
+            "DXFIN", "IMPORT" -> dxfPicker.launch(arrayOf("*/*"))
+            "ORTHO" -> orthoOn = !orthoOn
+            "SNAP" -> snapOn = !snapOn
+            "CANCEL", "ESC" -> resetToolState()
+            else -> recognized = false
+        }
+        commandFeedback = if (recognized) null else "Unknown command: $cmd"
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1586,6 +1631,23 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                     }
                 }
+            }
+
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = commandInput,
+                    onValueChange = { commandInput = it; commandFeedback = null },
+                    singleLine = true,
+                    label = { Text("Command") },
+                    placeholder = { Text("L, C, FILLET, 'ORTHO …") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
+            }
+            commandFeedback?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
