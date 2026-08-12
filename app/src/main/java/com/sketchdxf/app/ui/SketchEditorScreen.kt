@@ -1038,14 +1038,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             unitLabel = unit,
             onConfirm = { updated -> pushUndo(); shapes[editingIndex] = updated; editingIndex = -1 },
             onDelete = { pushUndo(); shapes.removeAt(editingIndex); editingIndex = -1 },
-            onMove = {
-                selectedIndices.clear(); selectedIndices.add(editingIndex)
-                editingIndex = -1; tool = Tool.BOX_SELECT; moveModeActive = true
-            },
-            onCopy = {
-                selectedIndices.clear(); selectedIndices.add(editingIndex)
-                editingIndex = -1; tool = Tool.BOX_SELECT; copySelection()
-            },
             onDismiss = { editingIndex = -1 }
         )
     }
@@ -1396,7 +1388,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }, label = { Text("Pencil") })
                 FilterChip(selected = tool == Tool.BOX_SELECT, onClick = {
                     tool = Tool.BOX_SELECT; resetToolState()
-                }, label = { Text("Box") })
+                }, label = { Text("Select") })
                 FilterChip(selected = tool == Tool.BREAK, onClick = {
                     tool = Tool.BREAK; resetToolState()
                 }, label = { Text("Break") })
@@ -2503,10 +2495,7 @@ private fun DistanceCalibrationDialog(
 }
 
 @Composable
-private fun ShapeEditDialog(
-    shape: SketchShape, unitLabel: String, onConfirm: (SketchShape) -> Unit, onDelete: () -> Unit,
-    onMove: () -> Unit, onCopy: () -> Unit, onDismiss: () -> Unit
-) {
+private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (SketchShape) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
     when (shape.kind) {
         ShapeKind.LINE -> {
             var text by remember {
@@ -2542,8 +2531,6 @@ private fun ShapeEditDialog(
                 },
                 dismissButton = {
                     Row {
-                        TextButton(onClick = onMove) { Text("Move") }
-                        TextButton(onClick = onCopy) { Text("Copy") }
                         TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }
                         TextButton(onClick = onDismiss) { Text("Cancel") }
                     }
@@ -2567,8 +2554,6 @@ private fun ShapeEditDialog(
                     onConfirm(shape.copy(label = text, color = color?.toArgb(), fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize))
                 },
                 onDelete = onDelete,
-                onMove = onMove,
-                onCopy = onCopy,
                 onDismiss = onDismiss
             )
         }
@@ -2687,8 +2672,6 @@ private fun LabelInputDialog(
     unitLabel: String = "mm",
     onConfirm: (text: String, color: Color?, fontSizeMm: Float) -> Unit,
     onDelete: (() -> Unit)? = null,
-    onMove: (() -> Unit)? = null,
-    onCopy: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var text by remember { mutableStateOf(initial) }
@@ -2728,8 +2711,6 @@ private fun LabelInputDialog(
         },
         dismissButton = {
             Row {
-                if (onMove != null) TextButton(onClick = onMove) { Text("Move") }
-                if (onCopy != null) TextButton(onClick = onCopy) { Text("Copy") }
                 if (onDelete != null) TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
