@@ -241,6 +241,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // in progress, the same way AutoCAD lets you pan or toggle a mode mid-command.
     var commandInput by remember { mutableStateOf("") }
     var commandFeedback by remember { mutableStateOf<String?>(null) }
+    var commandLineVisible by remember { mutableStateOf(true) }
 
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
@@ -1718,20 +1719,31 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = commandInput,
-                    onValueChange = { commandInput = it; commandFeedback = null },
-                    singleLine = true,
-                    label = { Text("Command") },
-                    placeholder = { Text("L, C, FILLET, 'ORTHO …") },
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
-                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
+                Text(
+                    "Command line", style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
+                TextButton(onClick = { commandLineVisible = !commandLineVisible }) {
+                    Text(if (commandLineVisible) "Hide" else "Show")
+                }
             }
-            commandFeedback?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
+            if (commandLineVisible) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = commandInput,
+                        onValueChange = { commandInput = it; commandFeedback = null },
+                        singleLine = true,
+                        label = { Text("Command") },
+                        placeholder = { Text("L, C, FILLET, 'ORTHO …") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
+                }
+                commandFeedback?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
+                }
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
