@@ -147,7 +147,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -324,6 +324,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // 3-point ARC: tap start, then a point the arc passes through, then the end point.
     var arcP1 by remember { mutableStateOf<Offset?>(null) }
     var arcP2 by remember { mutableStateOf<Offset?>(null) }
+    // Distance/calibration tool: tap 2 points on the background reference image whose real-world
+    // distance is already known (e.g. written on the original blueprint) — the on-screen pixel
+    // gap between them versus that typed-in real value becomes the scale every future exact
+    // length (a drawn line, or a Dimension's prefilled reading) is converted through, instead of
+    // the usual "median of confirmed lines" guess. See currentPxPerMm().
+    var distanceStart by remember { mutableStateOf<Offset?>(null) }
+    var pendingDistancePx by remember { mutableStateOf<Float?>(null) }
+    var calibrationRatio by remember { mutableStateOf<Float?>(null) } // px per mm
+    var useCalibrationRatio by remember { mutableStateOf(true) }
     var filletTap1 by remember { mutableStateOf<Offset?>(null) }
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
@@ -355,6 +364,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         stretchDragStart = null; stretchDragCurrent = null; stretchBasePoint = null
         stretchDirection = Offset.Zero; stretchAppliedPx = 0f; showStretchExactDialog = false
         arcP1 = null; arcP2 = null
+        distanceStart = null; pendingDistancePx = null
     }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
@@ -381,6 +391,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     /** Pixels per real-world mm, derived from confirmed lines so far (or a sensible default). */
     fun currentPxPerMm(): Float {
+        if (useCalibrationRatio) calibrationRatio?.let { return it }
         val ratios = shapes.filter { it.kind == ShapeKind.LINE && it.confirmed && it.realLength > 0.01 }
             .map { hypotF(it.x2 - it.x1, it.y2 - it.y1) / it.realLength.toFloat() }
         if (ratios.isNotEmpty()) return ratios.sorted()[ratios.size / 2]
@@ -1018,6 +1029,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { pendingDimension = null }
         )
     }
+    pendingDistancePx?.let { px ->
+        DistanceCalibrationDialog(
+            measuredPx = px,
+            unitLabel = unit,
+            onConfirm = { realValueDisplay ->
+                val realMm = displayToMm(realValueDisplay.toDouble(), unit)
+                if (realMm > 0.01) calibrationRatio = px / realMm.toFloat()
+                pendingDistancePx = null
+            },
+            onDismiss = { pendingDistancePx = null }
+        )
+    }
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
         FilletRadiusDialog(
             error = filletError,
@@ -1089,6 +1112,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             "TR", "TRIM" -> tool = Tool.TRIM
             "EX", "EXTEND" -> tool = Tool.EXTEND
             "A", "ARC" -> tool = Tool.ARC
+            "DI", "DIST", "DISTANCE" -> tool = Tool.DISTANCE
             "P", "PAN" -> tool = Tool.PAN
             "FH", "FREEHAND", "PENCIL" -> tool = Tool.FREEHAND
             "SEL", "SELECT", "S" -> tool = Tool.SELECT
@@ -1177,6 +1201,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.ARC, onClick = {
                     tool = Tool.ARC; resetToolState()
                 }, label = { Text("Arc") })
+                FilterChip(selected = tool == Tool.DISTANCE, onClick = {
+                    tool = Tool.DISTANCE; resetToolState()
+                }, label = { Text("Distance") })
                 FilterChip(selected = tool == Tool.PAN, onClick = {
                     tool = Tool.PAN; resetToolState()
                 }, label = { Text("Pan/Zoom") })
@@ -1242,7 +1269,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         FilterChip(selected = dimMode == DimMode.LINEAR_H, onClick = { dimMode = DimMode.LINEAR_H }, label = { Text("Linear H") })
                         FilterChip(selected = dimMode == DimMode.LINEAR_V, onClick = { dimMode = DimMode.LINEAR_V }, label = { Text("Linear V") })
                     }
+                    if (calibrationRatio != null) {
+                        FilterChip(
+                            selected = useCalibrationRatio, onClick = { useCalibrationRatio = !useCalibrationRatio },
+                            label = { Text("Use scale") }
+                        )
+                    }
                 }
+            }
+            calibrationRatio?.let { r ->
+                val pxPerDisplayUnit = r * displayToMm(1.0, unit)
+                Text(
+                    "Scale set from Distance: 1$unit = ${trimNum(pxPerDisplayUnit)}px" +
+                        if (useCalibrationRatio) "" else " (currently off)",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
             Text(
                 when {
@@ -1265,6 +1307,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.ARC && arcP1 == null -> "Tap the arc's start point"
                     tool == Tool.ARC && arcP2 == null -> "Tap a point the arc should pass through"
                     tool == Tool.ARC -> "Tap the arc's end point"
+                    tool == Tool.DISTANCE && distanceStart == null -> "Tap the first point of a known distance (e.g. on the background image)"
+                    tool == Tool.DISTANCE -> "Tap the second point"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -1411,6 +1455,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             }
                                             arcP1 = null; arcP2 = null
                                         }
+                                    }
+                                })
+                                Tool.DISTANCE -> detectTapGestures(onTap = { p ->
+                                    val start = distanceStart
+                                    if (start == null) {
+                                        distanceStart = p
+                                    } else {
+                                        pendingDistancePx = hypotF(p.x - start.x, p.y - start.y)
+                                        distanceStart = null
                                     }
                                 })
                                 Tool.SELECT -> detectTapGestures(onTap = { p ->
@@ -1701,6 +1754,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                         arcP2?.let { p ->
                             drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
+                        distanceStart?.let { p ->
+                            drawCircle(Color(0xFF1565C0), radius = 8f, center = p)
                         }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
                             freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
@@ -2045,6 +2101,51 @@ private fun LineFinishDialog(
             }) { Text("Apply") }
         },
         dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as tapped") } }
+    )
+}
+
+/** Shown after the Distance tool's 2 taps: reports the on-screen pixel gap and asks for the real
+ *  distance those two points actually represent (e.g. a dimension already written on a traced
+ *  background photo) — confirming stores the ratio between the two as the calibration scale. */
+@Composable
+private fun DistanceCalibrationDialog(
+    measuredPx: Float,
+    unitLabel: String,
+    onConfirm: (realValue: Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set scale from distance") },
+        text = {
+            Column {
+                Text(
+                    "Measured on screen: ${trimNum(measuredPx.toDouble())}px between the two points you tapped.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                Text(
+                    "Enter the actual real-world distance those two points represent (e.g. a dimension already marked on the background image):",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Actual distance ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toFloatOrNull()
+                if (v == null || v <= 0f) error = "Enter a valid distance" else onConfirm(v)
+            }) { Text("Set scale") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
 
