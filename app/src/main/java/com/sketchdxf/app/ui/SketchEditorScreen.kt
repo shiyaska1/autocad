@@ -1,6 +1,9 @@
 package com.sketchdxf.app.ui
 
 import android.graphics.BitmapFactory
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -32,6 +35,7 @@ import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -78,6 +82,7 @@ import com.sketchdxf.app.data.SketchArc
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
+import com.sketchdxf.app.dxf.DxfReader
 import com.sketchdxf.app.dxf.DxfWriter
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.PreviewRenderer
@@ -214,6 +219,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
+    var dxfImportMessage by remember { mutableStateOf<String?>(null) }
 
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
@@ -707,6 +713,72 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return null
     }
 
+    /**
+     * Reads LINE/CIRCLE/ARC/TEXT entities from a picked .dxf file (the same subset DxfWriter
+     * produces) and places them onto the canvas, scaled to fit and Y-flipped from DXF's Y-up
+     * convention into this editor's Y-down one. Confirmed LINE lengths come straight from the
+     * file's own coordinates, so re-exporting keeps the original real-world dimensions exactly.
+     * Anything DxfReader doesn't understand (LWPOLYLINE, BLOCK/INSERT, ...) is just skipped.
+     */
+    fun importDxf(uri: Uri) {
+        val tempFile = SketchAttachmentStore.newFile(context, "import", "dxf")
+        val copied = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            } != null
+        }.getOrDefault(false)
+        if (!copied) { dxfImportMessage = "Couldn't read that file"; return }
+
+        val result = runCatching { DxfReader.read(tempFile) }.getOrNull()
+        SketchAttachmentStore.delete(tempFile.absolutePath)
+        if (result == null) { dxfImportMessage = "That file doesn't look like a valid DXF"; return }
+        if (result.shapes.isEmpty()) {
+            dxfImportMessage = if (result.skippedTypes.isNotEmpty())
+                "No LINE/CIRCLE/ARC/TEXT entities found — only ${result.skippedTypes.joinToString()}, which isn't supported yet"
+            else "No entities found in that file"
+            return
+        }
+
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        result.shapes.forEach { s ->
+            minX = minOf(minX, s.x1, s.x2, s.cx - s.r); maxX = maxOf(maxX, s.x1, s.x2, s.cx + s.r)
+            minY = minOf(minY, s.y1, s.y2, s.cy - s.r); maxY = maxOf(maxY, s.y1, s.y2, s.cy + s.r)
+        }
+        val spanX = (maxX - minX).coerceAtLeast(1f); val spanY = (maxY - minY).coerceAtLeast(1f)
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: 1000f
+        val fitScale = minOf((cw * 0.85f) / spanX, (ch * 0.85f) / spanY)
+        val offX = (cw - spanX * fitScale) / 2f
+        val offY = (ch - spanY * fitScale) / 2f
+        // DXF is Y-up; the canvas is Y-down — flip around the imported content's own top edge.
+        fun mapX(x: Float) = offX + (x - minX) * fitScale
+        fun mapY(y: Float) = offY + (maxY - y) * fitScale
+
+        val placed = result.shapes.map { s ->
+            when (s.kind) {
+                ShapeKind.CIRCLE -> s.copy(cx = mapX(s.cx), cy = mapY(s.cy), r = s.r * fitScale)
+                ShapeKind.TEXT -> s.copy(x1 = mapX(s.x1), y1 = mapY(s.y1))
+                ShapeKind.ARC -> s.copy(
+                    cx = mapX(s.cx), cy = mapY(s.cy), r = s.r * fitScale,
+                    x1 = mapX(s.x1), y1 = mapY(s.y1), x2 = mapX(s.x2), y2 = mapY(s.y2)
+                )
+                else -> { // LINE
+                    val realLenMm = hypot((s.x2 - s.x1).toDouble(), (s.y2 - s.y1).toDouble())
+                    s.copy(
+                        x1 = mapX(s.x1), y1 = mapY(s.y1), x2 = mapX(s.x2), y2 = mapY(s.y2),
+                        realLength = realLenMm, confirmed = realLenMm > 0.01
+                    )
+                }
+            }
+        }
+        pushUndo()
+        shapes.addAll(placed)
+        dxfImportMessage = if (result.skippedTypes.isNotEmpty())
+            "Imported ${placed.size} shape(s) — skipped unsupported entity types: ${result.skippedTypes.joinToString()}"
+        else "Imported ${placed.size} shape(s)"
+    }
+
     fun save() {
         busy = true
         scope.launch {
@@ -887,6 +959,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { undo(); resetToolState() }
         )
     }
+    dxfImportMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { dxfImportMessage = null },
+            title = { Text("Import DXF") },
+            text = { Text(msg) },
+            confirmButton = { TextButton(onClick = { dxfImportMessage = null }) { Text("OK") } }
+        )
+    }
+
+    val dxfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importDxf(uri)
+    }
 
     Scaffold(
         topBar = {
@@ -899,6 +983,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
+                    IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
                     IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
                     IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
                 },
