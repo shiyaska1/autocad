@@ -13,11 +13,13 @@ import kotlin.math.sin
  * A minimal DXF reader, symmetric to [DxfWriter]: understands the same entity subset that writer
  * produces (LINE, CIRCLE, ARC, TEXT, LWPOLYLINE), plus BLOCK/INSERT (a block's own definition is
  * flattened into ordinary shapes at every place it's inserted, and — since the app has its own
- * reusable Block library — every named, actually-used block is also handed back separately in
- * [Result.blocks] so the caller can save it there; see [Result.usedBlocks]). Anything else
- * (SPLINE, DIMENSION, VIEWPORT, old-style POLYLINE/VERTEX, ...) is silently skipped rather than
- * erroring, so a more complex external file just imports the parts this app understands, reported
- * via [Result.skippedTypes].
+ * reusable Block library — every named, actually-used block is also handed back separately so the
+ * caller can save it there; see [Result.usedBlocks]). Blocks that are themselves built from other
+ * blocks (a real library block very often is — e.g. a "bathroom" block that's just 3 nested
+ * INSERTs of toilet/sink/tub blocks, with no geometry of its own) are expanded recursively, with
+ * cycle protection. Anything else (SPLINE, DIMENSION, VIEWPORT, old-style POLYLINE/VERTEX, ...)
+ * is silently skipped rather than erroring, so a more complex external file just imports the parts
+ * this app understands, reported via [Result.skippedTypes].
  *
  * Reads the file as a stream (one group-code/value pair at a time, one entity's fields held at
  * once) rather than loading it whole — a real-world DXF exported from desktop CAD can be tens of
@@ -60,7 +62,7 @@ object DxfReader {
     }
 
     /** Builds one shape from an already-gathered entity's fields, or null for an unsupported
-     *  entity type — shared between top-level ENTITIES and a BLOCK definition's children. */
+     *  entity type — every direct (non-INSERT) child of a BLOCK or top-level ENTITIES. */
     private fun buildShape(entityType: String, fields: Map<Int, MutableList<String>>, mmPerUnit: Double): SketchShape? {
         fun d(groupCode: Int): Double = fields[groupCode]?.getOrNull(0)?.toDoubleOrNull() ?: 0.0
         // Group 420 is a 24-bit true colour (0x00RRGGBB, no alpha channel) — OR in full opacity
@@ -146,16 +148,63 @@ object DxfReader {
         }
     }
 
+    private fun shiftShape(s: SketchShape, dx: Float, dy: Float): SketchShape = when (s.kind) {
+        ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
+        ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
+        ShapeKind.FREEHAND, ShapeKind.POLYLINE ->
+            s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
+        ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
+        else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
+    }
+
+    /** A block's own body as read from the file: direct geometry entities plus, when it's built
+     *  from other blocks (very common for compound library symbols), references to expand. */
+    private sealed class RawChild {
+        data class Geom(val shape: SketchShape) : RawChild()
+        data class Ref(val blockName: String, val insX: Float, val insY: Float, val xScale: Float, val yScale: Float, val rotDeg: Float) : RawChild()
+    }
+    private class RawBlock(val base: Pair<Float, Float>, val children: MutableList<RawChild> = mutableListOf())
+
     private fun parse(reader: BufferedReader): Result {
         var mmPerUnit = 1.0
         val shapes = mutableListOf<SketchShape>()
         val skipped = mutableSetOf<String>()
 
-        // name -> (base point in mm, child entities in mm, still in absolute file coordinates —
-        // the base point is subtracted only once a block is actually exported as a BlockDef).
-        val blockChildren = mutableMapOf<String, MutableList<SketchShape>>()
-        val blockBase = mutableMapOf<String, Pair<Float, Float>>()
+        val rawBlocks = mutableMapOf<String, RawBlock>()
         val usedBlockNames = mutableSetOf<String>()
+        // Recursive expansion is resolved lazily (below) rather than while streaming, since a
+        // block can reference another block defined later in the BLOCKS section — memoized so
+        // a symbol used by hundreds of INSERTs (or nested into hundreds of other blocks) is only
+        // ever expanded once; visiting-guarded so a reference cycle degrades to "that nested
+        // reference contributes nothing" instead of infinite recursion.
+        val resolved = mutableMapOf<String, List<SketchShape>>()
+        val visiting = mutableSetOf<String>()
+        fun resolve(name: String): List<SketchShape> {
+            resolved[name]?.let { return it }
+            val block = rawBlocks[name] ?: return emptyList()
+            if (!visiting.add(name)) return emptyList() // already being resolved higher up this chain — cycle
+            val out = mutableListOf<SketchShape>()
+            block.children.forEach { child ->
+                when (child) {
+                    is RawChild.Geom -> out.add(child.shape)
+                    is RawChild.Ref -> out.addAll(expandRef(child))
+                }
+            }
+            visiting.remove(name)
+            resolved[name] = out
+            return out
+        }
+        // One INSERT reference, fully expanded: the referenced block's geometry (itself possibly
+        // nested), shifted off that block's own base point and placed via this reference's own
+        // insertion point/scale/rotation. Shared by nested refs (inside resolve()) and top-level
+        // ENTITIES INSERTs — the same operation either way.
+        fun expandRef(ref: RawChild.Ref): List<SketchShape> {
+            val base = rawBlocks[ref.blockName]?.base ?: (0f to 0f)
+            return resolve(ref.blockName).map { s ->
+                val local = shiftShape(s, -base.first, -base.second)
+                transformShape(local, ref.insX, ref.insY, ref.xScale, ref.yScale, ref.rotDeg)
+            }
+        }
 
         // Reads one (group code, value) line pair, or null at end of file.
         fun readPair(): Pair<Int, String>? {
@@ -177,6 +226,18 @@ object DxfReader {
                 next = readPair()
             }
             return fields to next
+        }
+
+        fun insertRef(fields: Map<Int, MutableList<String>>): RawChild.Ref? {
+            fun d(g: Int): Double = fields[g]?.getOrNull(0)?.toDoubleOrNull() ?: 0.0
+            val blockName = fields[2]?.getOrNull(0) ?: return null
+            return RawChild.Ref(
+                blockName = blockName,
+                insX = (d(10) * mmPerUnit).toFloat(), insY = (d(20) * mmPerUnit).toFloat(),
+                xScale = fields[41]?.getOrNull(0)?.toFloatOrNull() ?: 1f,
+                yScale = fields[42]?.getOrNull(0)?.toFloatOrNull() ?: 1f,
+                rotDeg = fields[50]?.getOrNull(0)?.toFloatOrNull() ?: 0f
+            )
         }
 
         var awaitingInsunits = false
@@ -207,9 +268,9 @@ object DxfReader {
                     val (fields, next) = gather()
                     val name = fields[2]?.getOrNull(0)
                     if (name != null) {
-                        blockBase[name] = (fields[10]?.getOrNull(0)?.toDoubleOrNull()?.times(mmPerUnit) ?: 0.0).toFloat() to
+                        val base = (fields[10]?.getOrNull(0)?.toDoubleOrNull()?.times(mmPerUnit) ?: 0.0).toFloat() to
                             (fields[20]?.getOrNull(0)?.toDoubleOrNull()?.times(mmPerUnit) ?: 0.0).toFloat()
-                        blockChildren[name] = mutableListOf()
+                        rawBlocks[name] = RawBlock(base)
                         currentBlockName = name
                     }
                     pair = next
@@ -222,30 +283,21 @@ object DxfReader {
                 inBlocks && code == 0 && currentBlockName != null -> {
                     val entityType = value
                     val (fields, next) = gather()
-                    // Nested block references aren't expanded — rare in practice for simple
-                    // furniture/door/window symbols, and avoids any risk of a reference cycle.
-                    if (entityType != "INSERT") {
-                        buildShape(entityType, fields, mmPerUnit)?.let { blockChildren[currentBlockName]?.add(it) }
+                    val block = rawBlocks[currentBlockName]
+                    if (entityType == "INSERT") {
+                        insertRef(fields)?.let { block?.children?.add(it) }
+                    } else {
+                        buildShape(entityType, fields, mmPerUnit)?.let { block?.children?.add(RawChild.Geom(it)) }
                     }
                     pair = next
                 }
 
                 inEntities && code == 0 && value == "INSERT" -> {
                     val (fields, next) = gather()
-                    fun d(g: Int): Double = fields[g]?.getOrNull(0)?.toDoubleOrNull() ?: 0.0
-                    val blockName = fields[2]?.getOrNull(0)
-                    val children = blockName?.let { blockChildren[it] }
-                    if (blockName != null && children != null) {
-                        usedBlockNames.add(blockName)
-                        val (baseX, baseY) = blockBase[blockName] ?: (0f to 0f)
-                        val insX = (d(10) * mmPerUnit).toFloat(); val insY = (d(20) * mmPerUnit).toFloat()
-                        val xScale = (fields[41]?.getOrNull(0)?.toFloatOrNull() ?: 1f)
-                        val yScale = (fields[42]?.getOrNull(0)?.toFloatOrNull() ?: 1f)
-                        val rotDeg = (fields[50]?.getOrNull(0)?.toFloatOrNull() ?: 0f)
-                        children.forEach { child ->
-                            val local = shiftShape(child, -baseX, -baseY)
-                            shapes.add(transformShape(local, insX, insY, xScale, yScale, rotDeg))
-                        }
+                    val ref = insertRef(fields)
+                    if (ref != null && rawBlocks.containsKey(ref.blockName)) {
+                        usedBlockNames.add(ref.blockName)
+                        shapes.addAll(expandRef(ref))
                     } else {
                         skipped.add("INSERT")
                     }
@@ -263,20 +315,15 @@ object DxfReader {
         }
 
         val usedBlocks = usedBlockNames
-            .filter { !it.startsWith("*") && !blockChildren[it].isNullOrEmpty() }
-            .map { name ->
-                val (baseX, baseY) = blockBase[name] ?: (0f to 0f)
-                BlockDef(name, blockChildren[name].orEmpty().map { shiftShape(it, -baseX, -baseY) })
+            .filter { !it.startsWith("*") }
+            .mapNotNull { name ->
+                val entities = resolve(name)
+                if (entities.isEmpty()) null
+                else {
+                    val (baseX, baseY) = rawBlocks[name]?.base ?: (0f to 0f)
+                    BlockDef(name, entities.map { shiftShape(it, -baseX, -baseY) })
+                }
             }
         return Result(shapes, skipped, usedBlocks)
-    }
-
-    private fun shiftShape(s: SketchShape, dx: Float, dy: Float): SketchShape = when (s.kind) {
-        ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
-        ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
-        ShapeKind.FREEHAND, ShapeKind.POLYLINE ->
-            s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
-        ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
-        else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
     }
 }
