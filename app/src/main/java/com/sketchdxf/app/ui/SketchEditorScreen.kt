@@ -51,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -732,6 +733,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
             Box(
                 Modifier.fillMaxWidth().aspectRatio(3f / 4f)
+                    // Zoomed-in content is scaled via graphicsLayer below, which doesn't clip by
+                    // default — without this, zooming in pushes the (invisible) touch region of
+                    // the canvas up over the toolbar, and its buttons stop receiving taps.
+                    .clipToBounds()
                     .background(Color.White)
                     .onSizeChanged { canvasSize = it }
                     .pointerInput(tool) {
