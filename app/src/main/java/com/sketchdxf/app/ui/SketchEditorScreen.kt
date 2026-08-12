@@ -568,6 +568,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
     }
 
+    /** AutoCAD-style Explode: turns every selected POLYLINE back into its individual LINE
+     *  segments — the reverse of "Convert to Polyline". The compound shape is removed and
+     *  replaced with plain LINEs, which are then left selected. */
+    fun explodeSelection() {
+        val targets = selectedIndices.filter { shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }
+        if (targets.isEmpty()) return
+        pushUndo()
+        val newLines = mutableListOf<SketchShape>()
+        targets.sorted().forEach { idx ->
+            val s = shapes[idx]
+            SketchPath.parse(s.path).zipWithNext { a, b ->
+                newLines.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.first, y1 = a.second, x2 = b.first, y2 = b.second, color = s.color))
+            }
+        }
+        targets.sortedDescending().forEach { shapes.removeAt(it) }
+        val firstNewIndex = shapes.size
+        shapes.addAll(newLines)
+        selectedIndices.clear()
+        selectedIndices.addAll(firstNewIndex until shapes.size)
+    }
+
     /** Creates the offset copy immediately, using the perpendicular distance from [sidePoint]
      *  to the (infinite) line through [lineIdx] — the side tapped decides the direction. */
     fun beginOffset(lineIdx: Int, sidePoint: Offset) {
@@ -1428,7 +1449,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 6.dp),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1441,6 +1462,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             selected = false, onClick = { convertFreehandSelection() },
                             label = { Text("Polyline") }
                         )
+                    }
+                    if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
+                        FilterChip(selected = false, onClick = { explodeSelection() }, label = { Text("Explode") })
                     }
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
                     FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
