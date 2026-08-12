@@ -646,6 +646,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         selectedIndices.addAll(firstNewIndex until shapes.size)
     }
 
+    /** AutoCAD-style Smooth: straightens the shaky jitter in one or more hand-drawn FREEHAND/
+     *  POLYLINE strokes while keeping any real corners — small wobbles collapse into a single
+     *  straight segment, larger genuine bends (an L-shaped wall, say) stay as separate segments.
+     *  Uses the Douglas-Peucker line-simplification algorithm; non-freehand shapes are untouched. */
+    fun smoothSelection() {
+        val targets = selectedIndices.filter {
+            val k = shapes.getOrNull(it)?.kind
+            k == ShapeKind.FREEHAND || k == ShapeKind.POLYLINE
+        }
+        if (targets.isEmpty()) return
+        pushUndo()
+        val tolerancePx = 14f
+        targets.forEach { idx ->
+            val s = shapes[idx]
+            val pts = SketchPath.parse(s.path).map { Offset(it.first, it.second) }
+            if (pts.size >= 3) {
+                val simplified = douglasPeucker(pts, tolerancePx)
+                shapes[idx] = s.copy(path = SketchPath.serialize(simplified.map { it.x to it.y }))
+            }
+        }
+    }
+
     /** Applies one line width (px) to every selected shape that draws a stroke — everything
      *  except TEXT, which has its own separate font-size control. 0 clears back to each shape
      *  kind's usual default width instead of setting an explicit one. */
@@ -1544,6 +1566,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
                         FilterChip(selected = false, onClick = { explodeSelection() }, label = { Text("Explode") })
+                    }
+                    if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND || shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
+                        FilterChip(selected = false, onClick = { smoothSelection() }, label = { Text("Smooth") })
                     }
                     FilterChip(selected = false, onClick = { showGroupWidthDialog = true }, label = { Text("Width") })
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
@@ -2995,6 +3020,27 @@ private fun distToSegment(p: Offset, a: Offset, b: Offset): Float {
     t = t.coerceIn(0f, 1f)
     val projX = a.x + t * dx; val projY = a.y + t * dy
     return hypotF(p.x - projX, p.y - projY)
+}
+
+/** Ramer/Douglas-Peucker line simplification: keeps only the points that matter to the stroke's
+ *  actual shape — any point within [epsilon] of the straight line between its neighbours on either
+ *  side is dropped, so shaky hand-drawn segments collapse to one straight line while real corners
+ *  (which deviate by more than [epsilon]) survive. Used by Box Select's "Smooth" action. */
+private fun douglasPeucker(points: List<Offset>, epsilon: Float): List<Offset> {
+    if (points.size < 3) return points
+    val first = points.first(); val last = points.last()
+    var maxDist = 0f; var index = 0
+    for (i in 1 until points.size - 1) {
+        val d = distToSegment(points[i], first, last)
+        if (d > maxDist) { maxDist = d; index = i }
+    }
+    return if (maxDist > epsilon) {
+        val left = douglasPeucker(points.subList(0, index + 1), epsilon)
+        val right = douglasPeucker(points.subList(index, points.size), epsilon)
+        left.dropLast(1) + right
+    } else {
+        listOf(first, last)
+    }
 }
 
 // Every SketchShape.realLength (and every pixel-derived distance) is always stored/computed in
