@@ -315,8 +315,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var selectDragStart by remember { mutableStateOf<Offset?>(null) }
     var selectDragCurrent by remember { mutableStateOf<Offset?>(null) }
     var moveModeActive by remember { mutableStateOf(false) }
+    // Copy works the same way as Move (armed, then a drag on the canvas supplies the placement)
+    // instead of pasting an instant fixed-offset copy — so the user aims each copy by hand.
+    var copyModeActive by remember { mutableStateOf(false) }
     var moveDragStart by remember { mutableStateOf<Offset?>(null) }
     var moveDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
+    // would land on — shown as a highlight, and used as the actual drop point on release.
+    var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
+
+    // Grip editing (Tool.SELECT): dragging a LINE/DIMENSION endpoint reshapes just that end,
+    // instead of moving the whole shape — same idea as AutoCAD's blue grip squares.
+    var gripDragIndex by remember { mutableStateOf(-1) }
+    var gripDragPart by remember { mutableStateOf(0) } // 1 = x1/y1 endpoint, 2 = x2/y2 endpoint
+    var selectTapStart by remember { mutableStateOf<Offset?>(null) }
 
     // Break: tap the line, tap the first break point, tap the second — the segment between the
     // two (projected onto the line) is removed. Tapping both points at nearly the same spot
@@ -371,7 +383,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         freehandPoints.clear()
         selectedIndices.clear()
         selectDragStart = null; selectDragCurrent = null
-        moveModeActive = false; moveDragStart = null; moveDragCurrent = null
+        moveModeActive = false; copyModeActive = false
+        moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
+        gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
         breakLineIndex = -1; breakPoint1 = null
         filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
         stretchPoints.clear()
@@ -383,11 +397,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         lastWallInnerEnd = null; lastWallOuterIndex = -1
     }
 
-    /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
-    fun trySnapPoint(p: Offset): Offset {
-        if (!snapOn) return p
-        var best = p; var bestDist = 28f
-        shapes.forEach { s ->
+    /** Nearest existing line endpoint/midpoint within range, excluding shapes at [excludeIndices]
+     *  (e.g. the ones currently being moved/copied, so a selection doesn't snap to itself) — null
+     *  when nothing is close enough. Used both to snap a single tapped point and to highlight the
+     *  point a live Move/Copy drag would land on. */
+    fun findSnapPoint(p: Offset, excludeIndices: Collection<Int> = emptyList()): Offset? {
+        if (!snapOn) return null
+        var best: Offset? = null; var bestDist = 28f
+        shapes.forEachIndexed { i, s ->
+            if (i in excludeIndices) return@forEachIndexed
             if (s.kind == ShapeKind.LINE) {
                 listOf(Offset(s.x1, s.y1), Offset(s.x2, s.y2), Offset((s.x1 + s.x2) / 2f, (s.y1 + s.y2) / 2f)).forEach { c ->
                     val d = hypotF(p.x - c.x, p.y - c.y)
@@ -397,6 +415,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
         return best
     }
+
+    /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
+    fun trySnapPoint(p: Offset): Offset = findSnapPoint(p) ?: p
 
     /** Locks [raw] onto the horizontal or vertical line through [start], whichever is closer —
      *  the end point keeps its tapped distance along that axis, like AutoCAD's Ortho mode. */
@@ -472,6 +493,23 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    /** Finds a draggable grip (a LINE/DIMENSION endpoint) near [p] — a tighter radius than the
+     *  usual hit-test so grabbing an endpoint to reshape it doesn't fight with tapping the shape's
+     *  body to open its edit dialog. Returns the shape index and which end (1 = x1/y1, 2 = x2/y2),
+     *  or null if nothing is close enough. */
+    fun hitTestGrip(p: Offset): Pair<Int, Int>? {
+        var best: Pair<Int, Int>? = null; var bestDist = 24f
+        shapes.forEachIndexed { i, s ->
+            if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
+                val d1 = hypotF(p.x - s.x1, p.y - s.y1)
+                if (d1 < bestDist) { bestDist = d1; best = i to 1 }
+                val d2 = hypotF(p.x - s.x2, p.y - s.y2)
+                if (d2 < bestDist) { bestDist = d2; best = i to 2 }
+            }
         }
         return best
     }
@@ -564,17 +602,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         pushUndo()
         selectedIndices.sortedDescending().forEach { shapes.removeAt(it) }
         selectedIndices.clear()
-    }
-
-    /** Duplicates every selected shape offset by a fixed paste distance, then selects the copies
-     *  so Move can immediately drag them into their real position. */
-    fun copySelection() {
-        if (selectedIndices.isEmpty()) return
-        pushUndo()
-        val pasteOffsetPx = 40f
-        val copies = selectedIndices.sorted().map { translateShape(shapes[it], pasteOffsetPx, pasteOffsetPx) }
-        selectedIndices.clear()
-        copies.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
     }
 
     /** Cleans up every selected FREEHAND stroke: one that's clearly meant as a circle (a closed
@@ -1407,8 +1434,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             if (!fullscreenCanvas) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Close/Save lead the same scrolling row as the tools instead of sitting on their
+                // own row underneath — one row of vertical space back for the canvas.
+                IconButton(onClick = onBack, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
+                IconButton(onClick = { save() }, enabled = !busy && loaded) {
+                    if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Filled.Save, "Save")
+                }
                 FilterChip(selected = tool == Tool.SELECT, onClick = {
                     tool = Tool.SELECT; resetToolState()
                 }, label = { Icon(Icons.Filled.NearMe, "Select") })
@@ -1483,16 +1518,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 )
             }
-            // Icon-sized and pinned right under the tools, not at the bottom of the screen — the
-            // full-width text buttons that used to live there could end up below the fold (or
-            // behind the keyboard) once the canvas was scrolled/zoomed, making Save hard to reach.
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
-                IconButton(onClick = onBack, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
-                IconButton(onClick = { save() }, enabled = !busy && loaded) {
-                    if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Filled.Save, "Save")
-                }
-            }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
@@ -1500,8 +1525,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("${selectedIndices.size} selected", style = MaterialTheme.typography.bodySmall)
-                    FilterChip(selected = moveModeActive, onClick = { moveModeActive = !moveModeActive }, label = { Text("Move") })
-                    FilterChip(selected = false, onClick = { copySelection() }, label = { Text("Copy") })
+                    FilterChip(
+                        selected = moveModeActive,
+                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) copyModeActive = false },
+                        label = { Text("Move") }
+                    )
+                    FilterChip(
+                        selected = copyModeActive,
+                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) moveModeActive = false },
+                        label = { Text("Copy") }
+                    )
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
                         FilterChip(
@@ -1514,7 +1547,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     FilterChip(selected = false, onClick = { showGroupWidthDialog = true }, label = { Text("Width") })
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
-                    FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
+                    FilterChip(
+                        selected = false,
+                        onClick = { selectedIndices.clear(); moveModeActive = false; copyModeActive = false },
+                        label = { Text("Clear") }
+                    )
                 }
             }
             if (tool == Tool.LINE || tool == Tool.RECTANGLE || tool == Tool.DIMENSION) {
@@ -1558,7 +1595,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
             Text(
                 when {
-                    tool == Tool.SELECT -> "Tap a line/circle/text/dimension to edit or delete it"
+                    tool == Tool.SELECT -> "Tap a shape to edit it, or drag an end-point grip to reshape it"
                     tool == Tool.LINE && lineStartPoint == null -> "Tap the line's start point"
                     tool == Tool.LINE -> "Tap the end point — length is automatic, or type an exact one after"
                     tool == Tool.RECTANGLE -> "Drag from one corner to the opposite corner"
@@ -1582,7 +1619,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
-                    tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
+                    tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
+                    tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
                     tool == Tool.BOX_SELECT -> "${selectedIndices.size} selected — Move, Copy or Delete below, or drag a new box"
                     tool == Tool.BREAK && breakLineIndex < 0 -> "Tap the line to break"
@@ -1632,7 +1670,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
                     Canvas(
-                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, stretchArmed) {
+                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
@@ -1752,10 +1790,42 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         tool = Tool.SELECT
                                     }
                                 })
-                                Tool.SELECT -> detectTapGestures(onTap = { p ->
-                                    val idx = hitTest(p)
-                                    if (idx >= 0) editingIndex = idx
-                                })
+                                Tool.SELECT -> detectDragGestures(
+                                    onDragStart = { p ->
+                                        val grip = hitTestGrip(p)
+                                        if (grip != null) {
+                                            pushUndo()
+                                            gripDragIndex = grip.first; gripDragPart = grip.second
+                                        } else {
+                                            selectTapStart = p
+                                        }
+                                    },
+                                    onDrag = { change, _ ->
+                                        val idx = gripDragIndex
+                                        if (idx >= 0) {
+                                            val np = trySnapPoint(change.position)
+                                            val s = shapes[idx]
+                                            // Reshaping an endpoint by hand invalidates any previously
+                                            // confirmed/typed real-world length, same as Trim/Extend/Break.
+                                            shapes[idx] = if (gripDragPart == 1) {
+                                                s.copy(x1 = np.x, y1 = np.y, confirmed = false, realLength = 0.0)
+                                            } else {
+                                                s.copy(x2 = np.x, y2 = np.y, confirmed = false, realLength = 0.0)
+                                            }
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (gripDragIndex < 0) {
+                                            // No grip was grabbed at drag-start: treat this as a tap on
+                                            // the shape's body, same as before grips existed.
+                                            selectTapStart?.let { p ->
+                                                val idx = hitTest(p)
+                                                if (idx >= 0) editingIndex = idx
+                                            }
+                                        }
+                                        gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
+                                    }
+                                )
                                 Tool.OFFSET -> detectTapGestures(onTap = { p ->
                                     if (offsetLineIndex < 0) {
                                         val idx = hitTestLine(p)
@@ -1806,22 +1876,34 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         freehandPoints.clear()
                                     }
                                 )
-                                Tool.BOX_SELECT -> if (moveModeActive) {
-                                    // Armed by the Move action: this drag translates the whole selection.
+                                Tool.BOX_SELECT -> if (moveModeActive || copyModeActive) {
+                                    // Armed by the Move or Copy action: this drag supplies the placement —
+                                    // Move translates the selection, Copy leaves the originals and adds
+                                    // translated duplicates instead. While dragging, the nearest existing
+                                    // point (if Snap is on) is highlighted and used as the actual drop point.
                                     detectDragGestures(
-                                        onDragStart = { p -> moveDragStart = p; moveDragCurrent = p },
-                                        onDrag = { change, _ -> moveDragCurrent = change.position },
+                                        onDragStart = { p -> moveDragStart = p; moveDragCurrent = p; moveSnapTarget = null },
+                                        onDrag = { change, _ ->
+                                            moveDragCurrent = change.position
+                                            moveSnapTarget = findSnapPoint(change.position, selectedIndices)
+                                        },
                                         onDragEnd = {
-                                            val s = moveDragStart; val c = moveDragCurrent
+                                            val s = moveDragStart; val c = moveSnapTarget ?: moveDragCurrent
                                             if (s != null && c != null) {
                                                 val dx = c.x - s.x; val dy = c.y - s.y
                                                 if (hypotF(dx, dy) > 2f) {
                                                     pushUndo()
-                                                    selectedIndices.forEach { idx -> shapes[idx] = translateShape(shapes[idx], dx, dy) }
+                                                    if (copyModeActive) {
+                                                        val copies = selectedIndices.sorted().map { translateShape(shapes[it], dx, dy) }
+                                                        selectedIndices.clear()
+                                                        copies.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+                                                    } else {
+                                                        selectedIndices.forEach { idx -> shapes[idx] = translateShape(shapes[idx], dx, dy) }
+                                                    }
                                                 }
                                             }
-                                            moveDragStart = null; moveDragCurrent = null
-                                            moveModeActive = false
+                                            moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
+                                            moveModeActive = false; copyModeActive = false
                                         }
                                     )
                                 } else {
@@ -2056,26 +2138,53 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
                             freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
                         }
+                        if (tool == Tool.SELECT) {
+                            // AutoCAD-style grips: every LINE/DIMENSION endpoint is a small draggable
+                            // handle — drag one to reshape just that end instead of moving the whole
+                            // shape. The one currently being dragged is drawn larger and filled.
+                            shapes.forEachIndexed { i, s ->
+                                if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
+                                    listOf(1 to Offset(s.x1, s.y1), 2 to Offset(s.x2, s.y2)).forEach { (part, pt) ->
+                                        val active = gripDragIndex == i && gripDragPart == part
+                                        drawRect(
+                                            Color(0xFF1565C0),
+                                            topLeft = Offset(pt.x - if (active) 8f else 6f, pt.y - if (active) 8f else 6f),
+                                            size = androidx.compose.ui.geometry.Size(if (active) 16f else 12f, if (active) 16f else 12f),
+                                            style = if (active) androidx.compose.ui.graphics.drawscope.Fill
+                                            else androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         if (tool == Tool.BOX_SELECT) {
-                            if (moveModeActive) {
-                                val s2 = moveDragStart; val c2 = moveDragCurrent
+                            if (moveModeActive || copyModeActive) {
+                                val s2 = moveDragStart; val c2 = moveSnapTarget ?: moveDragCurrent
                                 if (s2 != null && c2 != null) {
                                     val dx = c2.x - s2.x; val dy = c2.y - s2.y
+                                    val ghostColor = if (copyModeActive) Color(0xFF2E7D32) else Color.Gray
                                     selectedIndices.forEach { idx ->
                                         val sh = translateShape(shapes[idx], dx, dy)
                                         when (sh.kind) {
                                             ShapeKind.CIRCLE -> drawCircle(
-                                                Color.Gray, radius = sh.r, center = Offset(sh.cx, sh.cy),
+                                                ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy),
                                                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
                                             )
                                             ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(sh.path).zipWithNext { a, b ->
-                                                drawLine(Color.Gray, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
+                                                drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
                                             }
-                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
-                                            ShapeKind.TEXT -> drawCircle(Color.Gray, radius = 6f, center = Offset(sh.x1, sh.y1))
-                                            else -> drawLine(Color.Gray, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = 4f)
+                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = 4f) }
+                                            ShapeKind.TEXT -> drawCircle(ghostColor, radius = 6f, center = Offset(sh.x1, sh.y1))
+                                            else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = 4f)
                                         }
                                     }
+                                }
+                                // Highlights the existing point a Snap-assisted Move/Copy drag would land on.
+                                moveSnapTarget?.let { p ->
+                                    drawCircle(
+                                        Color(0xFFE65100), radius = 11f, center = p,
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                                    )
                                 }
                             } else {
                                 val s2 = selectDragStart; val c2 = selectDragCurrent
