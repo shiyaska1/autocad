@@ -179,7 +179,21 @@ object DxfReader {
         // reference contributes nothing" instead of infinite recursion.
         val resolved = mutableMapOf<String, List<SketchShape>>()
         val visiting = mutableSetOf<String>()
-        fun resolve(name: String): List<SketchShape> {
+        // One INSERT reference, fully expanded: the referenced block's geometry (itself possibly
+        // nested, resolved recursively below), shifted off that block's own base point and placed
+        // via this reference's own insertion point/scale/rotation. Shared by nested refs and
+        // top-level ENTITIES INSERTs — the same operation either way. (A local fun can't
+        // forward-reference another not-yet-declared local fun for mutual recursion the way
+        // resolve()/expandRef() would need to, so expandRef takes resolve() as a parameter.)
+        fun expandRef(ref: RawChild.Ref, resolveFn: (String) -> List<SketchShape>): List<SketchShape> {
+            val base = rawBlocks[ref.blockName]?.base ?: (0f to 0f)
+            return resolveFn(ref.blockName).map { s ->
+                val local = shiftShape(s, -base.first, -base.second)
+                transformShape(local, ref.insX, ref.insY, ref.xScale, ref.yScale, ref.rotDeg)
+            }
+        }
+        lateinit var resolve: (String) -> List<SketchShape>
+        resolve = fun(name: String): List<SketchShape> {
             resolved[name]?.let { return it }
             val block = rawBlocks[name] ?: return emptyList()
             if (!visiting.add(name)) return emptyList() // already being resolved higher up this chain — cycle
@@ -187,23 +201,12 @@ object DxfReader {
             block.children.forEach { child ->
                 when (child) {
                     is RawChild.Geom -> out.add(child.shape)
-                    is RawChild.Ref -> out.addAll(expandRef(child))
+                    is RawChild.Ref -> out.addAll(expandRef(child, resolve))
                 }
             }
             visiting.remove(name)
             resolved[name] = out
             return out
-        }
-        // One INSERT reference, fully expanded: the referenced block's geometry (itself possibly
-        // nested), shifted off that block's own base point and placed via this reference's own
-        // insertion point/scale/rotation. Shared by nested refs (inside resolve()) and top-level
-        // ENTITIES INSERTs — the same operation either way.
-        fun expandRef(ref: RawChild.Ref): List<SketchShape> {
-            val base = rawBlocks[ref.blockName]?.base ?: (0f to 0f)
-            return resolve(ref.blockName).map { s ->
-                val local = shiftShape(s, -base.first, -base.second)
-                transformShape(local, ref.insX, ref.insY, ref.xScale, ref.yScale, ref.rotDeg)
-            }
         }
 
         // Reads one (group code, value) line pair, or null at end of file.
@@ -297,7 +300,7 @@ object DxfReader {
                     val ref = insertRef(fields)
                     if (ref != null && rawBlocks.containsKey(ref.blockName)) {
                         usedBlockNames.add(ref.blockName)
-                        shapes.addAll(expandRef(ref))
+                        shapes.addAll(expandRef(ref, resolve))
                     } else {
                         skipped.add("INSERT")
                     }
