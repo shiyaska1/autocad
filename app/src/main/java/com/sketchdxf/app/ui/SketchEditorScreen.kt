@@ -132,7 +132,11 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH }
+
+/** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
+ *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
+private data class StretchPoint(val shapeIndex: Int, val part: Int)
 private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
 
 /**
@@ -266,6 +270,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
 
+    // Stretch: drag a crossing box — only the endpoints inside it are captured (a fully-enclosed
+    // shape moves as a whole; a shape with just one end inside gets genuinely stretched). Then tap
+    // a base point and a second point for the direction; an exact distance can override afterward.
+    val stretchPoints = remember { mutableStateListOf<StretchPoint>() }
+    var stretchDragStart by remember { mutableStateOf<Offset?>(null) }
+    var stretchDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    var stretchBasePoint by remember { mutableStateOf<Offset?>(null) }
+    var stretchDirection by remember { mutableStateOf(Offset.Zero) }
+    var stretchAppliedPx by remember { mutableStateOf(0f) }
+    var showStretchExactDialog by remember { mutableStateOf(false) }
+
     fun resetToolState() {
         lineStartPoint = null
         offsetLineIndex = -1
@@ -277,6 +292,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         moveModeActive = false; moveDragStart = null; moveDragCurrent = null
         breakLineIndex = -1; breakPoint1 = null
         filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
+        stretchPoints.clear()
+        stretchDragStart = null; stretchDragCurrent = null; stretchBasePoint = null
+        stretchDirection = Offset.Zero; stretchAppliedPx = 0f; showStretchExactDialog = false
     }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
@@ -530,6 +548,44 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             )
         )
         return null
+    }
+
+    /** Crossing-selects individual endpoints (not whole shapes) inside [rect] — the basis of
+     *  Stretch. FREEHAND/ARC aren't captured; they always stay put. */
+    fun computeStretchSelection(rect: androidx.compose.ui.geometry.Rect) {
+        stretchPoints.clear()
+        shapes.forEachIndexed { i, s ->
+            when (s.kind) {
+                ShapeKind.LINE, ShapeKind.DIMENSION -> {
+                    if (rect.contains(Offset(s.x1, s.y1))) stretchPoints.add(StretchPoint(i, 0))
+                    if (rect.contains(Offset(s.x2, s.y2))) stretchPoints.add(StretchPoint(i, 1))
+                }
+                ShapeKind.CIRCLE -> if (rect.contains(Offset(s.cx, s.cy))) stretchPoints.add(StretchPoint(i, 0))
+                ShapeKind.TEXT -> if (rect.contains(Offset(s.x1, s.y1))) stretchPoints.add(StretchPoint(i, 0))
+            }
+        }
+    }
+
+    /** Moves every captured endpoint by (dx, dy). A shape captured at only one end is genuinely
+     *  stretched (its length changes, so any confirmed real length no longer applies); a shape
+     *  captured at both ends just translates, keeping its confirmed length as-is. */
+    fun applyStretchDelta(dx: Float, dy: Float) {
+        stretchPoints.groupBy { it.shapeIndex }.forEach { (idx, pts) ->
+            val s = shapes.getOrNull(idx) ?: return@forEach
+            shapes[idx] = when (s.kind) {
+                ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
+                ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
+                else -> {
+                    val movesFirst = pts.any { it.part == 0 }
+                    val movesSecond = pts.any { it.part == 1 }
+                    var updated = s
+                    if (movesFirst) updated = updated.copy(x1 = updated.x1 + dx, y1 = updated.y1 + dy)
+                    if (movesSecond) updated = updated.copy(x2 = updated.x2 + dx, y2 = updated.y2 + dy)
+                    if (movesFirst != movesSecond) updated = updated.copy(confirmed = false, realLength = 0.0)
+                    updated
+                }
+            }
+        }
     }
 
     val baseBitmap = remember(baseImagePath) {
@@ -787,6 +843,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { resetToolState() }
         )
     }
+    if (showStretchExactDialog) {
+        OptionalDistanceDialog(
+            title = "Stretch distance",
+            asIsMm = stretchAppliedPx / currentPxPerMm(),
+            fieldLabel = "Exact distance (mm) — optional",
+            onSetExact = { mm ->
+                val exactPx = mm.toFloat() * currentPxPerMm()
+                val correctionPx = exactPx - stretchAppliedPx
+                applyStretchDelta(stretchDirection.x * correctionPx, stretchDirection.y * correctionPx)
+                resetToolState()
+            },
+            onUseAsIs = { resetToolState() },
+            onCancel = { undo(); resetToolState() }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -858,6 +929,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.FILLET, onClick = {
                     tool = Tool.FILLET; resetToolState()
                 }, label = { Text("Fillet") })
+                FilterChip(selected = tool == Tool.STRETCH, onClick = {
+                    tool = Tool.STRETCH; resetToolState()
+                }, label = { Text("Stretch") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
             }
@@ -913,6 +987,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.FILLET && filletIndex1 < 0 -> "Tap the first line"
                     tool == Tool.FILLET && filletIndex2 < 0 -> "Tap the second line"
                     tool == Tool.FILLET -> "Enter the fillet radius"
+                    tool == Tool.STRETCH && stretchPoints.isEmpty() -> "Drag a crossing box over just the part to stretch"
+                    tool == Tool.STRETCH && stretchBasePoint == null -> "${stretchPoints.size} point(s) captured — tap a base point"
+                    tool == Tool.STRETCH -> "Tap where it should end up, then set an exact distance or use it as tapped"
                     else -> "Pinch to zoom, drag to pan"
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -947,8 +1024,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (baseBitmap != null) {
                         Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                     }
+                    val stretchArmed = stretchPoints.isNotEmpty()
                     Canvas(
-                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive) {
+                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, stretchArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
@@ -1140,6 +1218,40 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         else -> {}
                                     }
                                 })
+                                Tool.STRETCH -> if (!stretchArmed) {
+                                    detectDragGestures(
+                                        onDragStart = { p -> stretchDragStart = p; stretchDragCurrent = p },
+                                        onDrag = { change, _ -> stretchDragCurrent = change.position },
+                                        onDragEnd = {
+                                            val s = stretchDragStart; val c = stretchDragCurrent
+                                            if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
+                                                val rect = androidx.compose.ui.geometry.Rect(
+                                                    minOf(s.x, c.x), minOf(s.y, c.y), maxOf(s.x, c.x), maxOf(s.y, c.y)
+                                                )
+                                                computeStretchSelection(rect)
+                                            }
+                                            stretchDragStart = null; stretchDragCurrent = null
+                                        }
+                                    )
+                                } else {
+                                    detectTapGestures(onTap = { p ->
+                                        val base = stretchBasePoint
+                                        if (base == null) {
+                                            stretchBasePoint = trySnapPoint(p)
+                                        } else {
+                                            val snapped = trySnapPoint(p)
+                                            val delta = Offset(snapped.x - base.x, snapped.y - base.y)
+                                            val mag = hypotF(delta.x, delta.y)
+                                            if (mag > 2f) {
+                                                stretchDirection = Offset(delta.x / mag, delta.y / mag)
+                                                stretchAppliedPx = mag
+                                                pushUndo()
+                                                applyStretchDelta(delta.x, delta.y)
+                                                showStretchExactDialog = true
+                                            }
+                                        }
+                                    })
+                                }
                             }
                         }
                     ) {
@@ -1244,6 +1356,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         filletTap2?.let { p ->
                             drawCircle(Color(0xFFE65100), radius = 8f, center = p)
                         }
+                        stretchBasePoint?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
                             freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
                         }
@@ -1285,6 +1400,31 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         )
                                     )
                                 }
+                            }
+                        }
+                        if (tool == Tool.STRETCH) {
+                            val s2 = stretchDragStart; val c2 = stretchDragCurrent
+                            if (s2 != null && c2 != null) {
+                                val topLeft = Offset(minOf(s2.x, c2.x), minOf(s2.y, c2.y))
+                                val boxSize = androidx.compose.ui.geometry.Size(abs(c2.x - s2.x), abs(c2.y - s2.y))
+                                // Always a crossing box — that's the whole point of Stretch.
+                                val stretchColor = Color(0xFF2E7D32)
+                                drawRect(stretchColor.copy(alpha = 0.12f), topLeft = topLeft, size = boxSize)
+                                drawRect(
+                                    stretchColor, topLeft = topLeft, size = boxSize,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                        width = 2f, pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                                    )
+                                )
+                            }
+                            stretchPoints.forEach { sp ->
+                                val s = shapes.getOrNull(sp.shapeIndex) ?: return@forEach
+                                val p = when {
+                                    s.kind == ShapeKind.CIRCLE -> Offset(s.cx, s.cy)
+                                    sp.part == 0 -> Offset(s.x1, s.y1)
+                                    else -> Offset(s.x2, s.y2)
+                                }
+                                drawCircle(Color(0xFFE65100), radius = 7f, center = p)
                             }
                         }
                     }
