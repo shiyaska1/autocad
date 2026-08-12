@@ -448,13 +448,30 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
     }
 
+    /** Rough (width, height) in px of a TEXT shape as actually drawn (see the drawing loop and
+     *  [SketchShape.fontSize]) — used so tapping anywhere over a label selects it, not just right
+     *  on its anchor point, which used to make longer or larger text hard to tap reliably. */
+    fun textExtent(s: SketchShape): Pair<Float, Float> {
+        val sizePx = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f
+        return (s.label.length * sizePx * 0.56f) to sizePx
+    }
+
+    fun distToRect(p: Offset, r: androidx.compose.ui.geometry.Rect): Float {
+        val dx = maxOf(r.left - p.x, 0f, p.x - r.right)
+        val dy = maxOf(r.top - p.y, 0f, p.y - r.bottom)
+        return hypotF(dx, dy)
+    }
+
     fun hitTest(p: Offset): Int {
         var best = -1; var bestDist = 26f
         shapes.forEachIndexed { i, s ->
             val d = when (s.kind) {
                 ShapeKind.LINE -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
                 ShapeKind.CIRCLE -> abs(hypotF(p.x - s.cx, p.y - s.cy) - s.r)
-                ShapeKind.TEXT -> hypotF(p.x - s.x1, p.y - s.y1)
+                ShapeKind.TEXT -> {
+                    val (w, h) = textExtent(s)
+                    distToRect(p, androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f))
+                }
                 ShapeKind.DIMENSION -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
@@ -473,7 +490,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     /** Bounding box used by box-select to decide whether a shape falls inside the drag rect. */
     fun shapeBounds(s: SketchShape): androidx.compose.ui.geometry.Rect = when (s.kind) {
         ShapeKind.CIRCLE -> androidx.compose.ui.geometry.Rect(s.cx - s.r, s.cy - s.r, s.cx + s.r, s.cy + s.r)
-        ShapeKind.TEXT -> androidx.compose.ui.geometry.Rect(s.x1 - 12f, s.y1 - 12f, s.x1 + 12f, s.y1 + 12f)
+        ShapeKind.TEXT -> textExtent(s).let { (w, h) -> androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f) }
         ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
             val pts = SketchPath.parse(s.path)
             if (pts.isEmpty()) androidx.compose.ui.geometry.Rect(s.x1, s.y1, s.x1, s.y1)
