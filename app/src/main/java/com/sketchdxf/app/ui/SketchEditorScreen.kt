@@ -1698,6 +1698,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val factor = if (insertUseRatio && block.pxPerMm > 0f) currentPxPerMm() / block.pxPerMm else 1f
                                         pushUndo()
                                         shapes.addAll(local.map { translateShape(scaleShape(it, factor), p.x, p.y) })
+                                        // One insert per pick, not one per tap — arm the picker again
+                                        // (tap "Block") for another copy instead of it repeating on
+                                        // every further tap.
+                                        pendingBlockInsert = null
+                                        tool = Tool.SELECT
                                     }
                                 })
                                 Tool.SELECT -> detectTapGestures(onTap = { p ->
