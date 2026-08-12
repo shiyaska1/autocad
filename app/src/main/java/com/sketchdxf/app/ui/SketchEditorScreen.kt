@@ -143,7 +143,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -279,6 +279,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var trimBoundaryIndex by remember { mutableStateOf(-1) }
     var trimTargetIndex by remember { mutableStateOf(-1) }
 
+    // Extend: tap the boundary line once, then tap any number of lines near the end that should
+    // reach it — the boundary stays selected so several lines can be extended to it in a row.
+    var extendBoundaryIndex by remember { mutableStateOf(-1) }
+    var extendMessage by remember { mutableStateOf<String?>(null) }
+
     // Dimension: tap point 1, tap point 2 (both snap-aware), then type the dimension text —
     // pre-filled with the measured value but freely editable, e.g. to write "3000 CRS" instead.
     // Aligned measures the true distance between the points; Linear measures only the
@@ -327,6 +332,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         lineStartPoint = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
+        extendBoundaryIndex = -1; extendMessage = null
         dimStartPoint = null; pendingDimension = null
         freehandPoints.clear()
         selectedIndices.clear()
@@ -512,6 +518,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
         }
         trimBoundaryIndex = -1; trimTargetIndex = -1
+    }
+
+    /** The counterpart to Trim: extends whichever end of [targetIdx] is nearer [tap] out to
+     *  where it meets [boundaryIdx] (extended if needed). Only valid when that meeting point
+     *  actually lies beyond the tapped end — otherwise the boundary crosses the line already
+     *  (that's a Trim, not an Extend) or sits behind the far end entirely. Returns an error
+     *  message, or null on success. Line length loses its confirmed status either way, since
+     *  extending changes it. */
+    fun performExtend(boundaryIdx: Int, targetIdx: Int, tap: Offset): String? {
+        val boundary = shapes.getOrNull(boundaryIdx) ?: return "That line no longer exists"
+        val target = shapes.getOrNull(targetIdx) ?: return "That line no longer exists"
+        val inter = lineIntersection(boundary, target) ?: return "Those lines are parallel — nothing to extend to"
+        val a = Offset(target.x1, target.y1); val b = Offset(target.x2, target.y2)
+        val tTap = projectParam(a, b, tap)
+        val tInt = projectParam(a, b, inter)
+        val extendEnd2 = tTap > 0.5f
+        val validExtension = if (extendEnd2) tInt > 1f else tInt < 0f
+        if (!validExtension) return "That boundary doesn't lie beyond the tapped end"
+        pushUndo()
+        shapes[targetIdx] = if (extendEnd2) target.copy(x2 = inter.x, y2 = inter.y, confirmed = false, realLength = 0.0)
+        else target.copy(x1 = inter.x, y1 = inter.y, confirmed = false, realLength = 0.0)
+        return null
     }
 
     /** Splits the line at the two (projected, clamped-to-segment) break points, removing the
@@ -1016,6 +1044,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             "DIM", "DIMENSION" -> tool = Tool.DIMENSION
             "O", "OFFSET" -> tool = Tool.OFFSET
             "TR", "TRIM" -> tool = Tool.TRIM
+            "EX", "EXTEND" -> tool = Tool.EXTEND
             "P", "PAN" -> tool = Tool.PAN
             "FH", "FREEHAND", "PENCIL" -> tool = Tool.FREEHAND
             "SEL", "SELECT", "S" -> tool = Tool.SELECT
@@ -1093,6 +1122,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (tool == Tool.TRIM) resetToolState()
                     tool = Tool.TRIM
                 }, label = { Text("Trim") })
+                FilterChip(selected = tool == Tool.EXTEND, onClick = {
+                    if (tool == Tool.EXTEND) resetToolState()
+                    tool = Tool.EXTEND
+                }, label = { Text("Extend") })
                 FilterChip(selected = tool == Tool.PAN, onClick = {
                     tool = Tool.PAN; resetToolState()
                 }, label = { Text("Pan/Zoom") })
@@ -1169,6 +1202,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.TRIM && trimBoundaryIndex < 0 -> "Tap the cutting line"
                     tool == Tool.TRIM && trimTargetIndex < 0 -> "Tap the line to trim"
                     tool == Tool.TRIM -> "Tap the side of the line to remove"
+                    tool == Tool.EXTEND && extendMessage != null -> extendMessage!!
+                    tool == Tool.EXTEND && extendBoundaryIndex < 0 -> "Tap the boundary line"
+                    tool == Tool.EXTEND -> "Tap a line near the end that should reach the boundary"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -1312,6 +1348,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             if (idx >= 0 && idx != trimBoundaryIndex) trimTargetIndex = idx
                                         }
                                         else -> trimAt(p)
+                                    }
+                                })
+                                Tool.EXTEND -> detectTapGestures(onTap = { p ->
+                                    if (extendBoundaryIndex < 0) {
+                                        val idx = hitTestLine(p)
+                                        if (idx >= 0) { extendBoundaryIndex = idx; extendMessage = null }
+                                    } else {
+                                        val idx = hitTestLine(p)
+                                        if (idx >= 0 && idx != extendBoundaryIndex) {
+                                            extendMessage = performExtend(extendBoundaryIndex, idx, p)
+                                        }
                                     }
                                 })
                                 Tool.PAN -> {}
@@ -1473,7 +1520,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             if (isHighlighted) highlightPaint else s.color?.let { Color(it) } ?: default
                         shapes.forEachIndexed { i, s ->
                             val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex ||
-                                i == breakLineIndex || i == filletIndex1 || i == filletIndex2 || i in selectedIndices
+                                i == breakLineIndex || i == filletIndex1 || i == filletIndex2 || i == extendBoundaryIndex || i in selectedIndices
                             when (s.kind) {
                                 ShapeKind.LINE -> {
                                     // Confirmed lines just turn green — no automatic length label; a
