@@ -1,6 +1,7 @@
 package com.sketchdxf.app
 
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
@@ -24,6 +25,10 @@ import com.sketchdxf.app.ui.SketchEditorScreen
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Sketching/tracing has long stretches with no touch input while you look at the plan —
+        // keep the screen from locking for as long as the app is open (normal lock/sleep behaviour
+        // resumes the moment you leave it).
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
