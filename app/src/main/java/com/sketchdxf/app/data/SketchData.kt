@@ -18,7 +18,11 @@ data class SketchWork(
     val updatedAt: Long,
     val dxfPath: String = "",
     val previewPath: String = "",
-    val status: String = "DRAFT" // DRAFT (not yet saved with a DXF) or FINALIZED
+    val status: String = "DRAFT", // DRAFT (not yet saved with a DXF) or FINALIZED
+    /** "mm" or "cm" — the unit every dimension typed into this work is shown/entered in. Defaults
+     *  to "mm" so migrated pre-existing rows (created before cm support) keep reading the way they
+     *  were originally saved; new works are created with "cm" explicitly (see SketchEditorScreen). */
+    val unit: String = "mm"
 )
 
 /** The original photo(s)/PDF page(s) the user picked or captured for a work. */

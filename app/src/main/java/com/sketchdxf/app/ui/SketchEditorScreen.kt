@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
@@ -159,6 +160,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var baseImagePath by remember { mutableStateOf<String?>(null) }
     var oldDxfPath by remember { mutableStateOf("") }
     var oldPreviewPath by remember { mutableStateOf("") }
+    var unit by remember { mutableStateOf("cm") }
     val sourcesRef = remember { mutableStateListOf<com.sketchdxf.app.data.SketchSource>() }
     val shapes = remember { mutableStateListOf<SketchShape>() }
 
@@ -198,6 +200,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         baseImagePath = PendingSketchEditor.baseImagePath
         oldDxfPath = PendingSketchEditor.oldDxfPath
         oldPreviewPath = PendingSketchEditor.oldPreviewPath
+        unit = PendingSketchEditor.unit
         sourcesRef.addAll(PendingSketchEditor.sources)
         shapes.addAll(PendingSketchEditor.shapes)
         loaded = true
@@ -215,6 +218,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
+
+    /** Keeps the drawing area always at least partly on screen — panning/zooming can't drag the
+     *  whole thing out of view (when zoomed in, the viewport can't go past the content's edges;
+     *  when zoomed out, the smaller content can't be pushed fully off the visible area). */
+    fun clampViewOffset(offset: Offset, scale: Float): Offset {
+        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
+        if (cw <= 0f || ch <= 0f) return offset
+        val slackX = cw - cw * scale; val slackY = ch - ch * scale
+        return Offset(
+            offset.x.coerceIn(minOf(0f, slackX), maxOf(0f, slackX)),
+            offset.y.coerceIn(minOf(0f, slackY), maxOf(0f, slackY))
+        )
+    }
 
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
@@ -643,7 +659,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             if (dir !in "RBLT") return "\"$tok\" doesn't start with R, B, L or T"
             val value = tok.substring(1).toDoubleOrNull()
             if (value == null || value <= 0) return "\"$tok\" needs a positive number after the direction"
-            Seg(dir, value)
+            Seg(dir, displayToMm(value, unit))
         }
 
         // Walk in mm-space first (screen-style: R=+x, L=-x, T=up=-y, B=down=+y).
@@ -697,7 +713,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val dao = AppDatabase.get(context).sketchDao()
             val now = System.currentTimeMillis()
             val finalName = name.trim().ifBlank { "Untitled" }
-            val id = if (workId > 0) workId else dao.insertWork(SketchWork(name = finalName, createdAt = now, updatedAt = now))
+            val id = if (workId > 0) workId else dao.insertWork(SketchWork(name = finalName, createdAt = now, updatedAt = now, unit = unit))
 
             dao.deleteShapesFor(id)
             if (shapes.isNotEmpty()) dao.insertShapes(shapes.map { it.copy(id = 0, workId = id) })
@@ -720,7 +736,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 SketchWork(
                     id = id, name = finalName, createdAt = if (createdAt > 0) createdAt else now,
                     updatedAt = now, dxfPath = dxfFile.absolutePath, previewPath = previewFile.absolutePath,
-                    status = "FINALIZED"
+                    status = "FINALIZED", unit = unit
                 )
             )
             busy = false
@@ -731,6 +747,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     if (editingIndex >= 0 && editingIndex < shapes.size) {
         ShapeEditDialog(
             shape = shapes[editingIndex],
+            unitLabel = unit,
             onConfirm = { updated -> pushUndo(); shapes[editingIndex] = updated; editingIndex = -1 },
             onDelete = { pushUndo(); shapes.removeAt(editingIndex); editingIndex = -1 },
             onDismiss = { editingIndex = -1 }
@@ -752,9 +769,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
     if (showRoomPlan) {
         RoomPlanDialog(
-            onConfirmRectangle = { l, w, t -> addRoomPlan(l, w, t); showRoomPlan = false },
+            unitLabel = unit,
+            onConfirmRectangle = { l, w, t ->
+                addRoomPlan(displayToMm(l, unit), displayToMm(w, unit), displayToMm(t, unit))
+                showRoomPlan = false
+            },
             onConfirmContinuous = { cmd, t ->
-                val err = addContinuousPlan(cmd, t)
+                val err = addContinuousPlan(cmd, displayToMm(t, unit))
                 if (err == null) showRoomPlan = false
                 err
             },
@@ -769,10 +790,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         // when Ortho is off and the tapped angle isn't one of those already.
         val showAngleField = !orthoOn && !isOrthoAngle(asDrawnAngleDeg)
         LineFinishDialog(
-            asIsMm = asDrawnMm,
+            asIsDisplay = mmToDisplay(asDrawnMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
             asIsAngleDeg = asDrawnAngleDeg,
             showAngleField = showAngleField,
-            onApply = { mm, angleDeg ->
+            onApply = { value, angleDeg ->
+                val mm = value?.let { displayToMm(it, unit) }
                 val cur = shapes[pendingLengthIndex]
                 val start = Offset(cur.x1, cur.y1)
                 val lenPx = if (mm != null) mm.toFloat() * currentPxPerMm() else hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
@@ -799,9 +822,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val asIsMm = hypotF(copy.x1 - orig.x1, copy.y1 - orig.y1) / currentPxPerMm()
         OptionalDistanceDialog(
             title = "Offset distance",
-            asIsMm = asIsMm,
-            fieldLabel = "Exact offset (mm) — optional",
-            onSetExact = { mm ->
+            asIsDisplay = mmToDisplay(asIsMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            fieldLabel = "Exact offset ($unit) — optional",
+            onSetExact = { value ->
+                val mm = displayToMm(value, unit)
                 val distPx = mm.toFloat() * currentPxPerMm() * offsetSign
                 val nx = offsetNormal.x; val ny = offsetNormal.y
                 shapes[offsetNewIndex] = orig.copy(
@@ -821,7 +846,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     pendingDimension?.let { (p1, p2) ->
         val measuredMm = hypotF(p2.x - p1.x, p2.y - p1.y) / currentPxPerMm()
         DimensionTextDialog(
-            initialText = "${trimNum(measuredMm.toDouble())}mm",
+            initialText = "${trimNum(mmToDisplay(measuredMm.toDouble(), unit))}$unit",
             onConfirm = { text ->
                 pushUndo()
                 shapes.add(SketchShape(workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, label = text))
@@ -833,9 +858,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
         FilletRadiusDialog(
             error = filletError,
-            onConfirm = { radiusMm ->
+            unitLabel = unit,
+            onConfirm = { radius ->
                 val p1 = filletTap1; val p2 = filletTap2
                 if (p1 != null && p2 != null) {
+                    val radiusMm = displayToMm(radius, unit)
                     val err = performFillet(filletIndex1, filletIndex2, (radiusMm * currentPxPerMm()).toFloat(), p1, p2)
                     if (err == null) resetToolState() else filletError = err
                 }
@@ -846,9 +873,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     if (showStretchExactDialog) {
         OptionalDistanceDialog(
             title = "Stretch distance",
-            asIsMm = stretchAppliedPx / currentPxPerMm(),
-            fieldLabel = "Exact distance (mm) — optional",
-            onSetExact = { mm ->
+            asIsDisplay = mmToDisplay((stretchAppliedPx / currentPxPerMm()).toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            fieldLabel = "Exact distance ($unit) — optional",
+            onSetExact = { value ->
+                val mm = displayToMm(value, unit)
                 val exactPx = mm.toFloat() * currentPxPerMm()
                 val correctionPx = exactPx - stretchAppliedPx
                 applyStretchDelta(stretchDirection.x * correctionPx, stretchDirection.y * correctionPx)
@@ -1004,13 +1033,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     // the canvas up over the toolbar, and its buttons stop receiving taps.
                     .clipToBounds()
                     .background(Color.White)
+                    .border(1.dp, Color(0xFF9E9E9E))
                     .onSizeChanged { canvasSize = it }
                     .pointerInput(tool) {
                         // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
                         // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
                         detectPanOrZoom(requireTwoFingers = tool != Tool.PAN) { pan, zoom ->
                             viewScale = (viewScale * zoom).coerceIn(0.5f, 6f)
-                            viewOffset += pan
+                            viewOffset = clampViewOffset(viewOffset + pan, viewScale)
                         }
                     }
             ) {
@@ -1472,7 +1502,7 @@ private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit
  * geometry can't support that radius, so a different value can be tried without re-picking lines.
  */
 @Composable
-private fun FilletRadiusDialog(error: String?, onConfirm: (radiusMm: Double) -> Unit, onDismiss: () -> Unit) {
+private fun FilletRadiusDialog(error: String?, unitLabel: String, onConfirm: (radius: Double) -> Unit, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf("0") }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1485,7 +1515,7 @@ private fun FilletRadiusDialog(error: String?, onConfirm: (radiusMm: Double) -> 
                 )
                 OutlinedTextField(
                     value = text, onValueChange = { text = it }, singleLine = true,
-                    label = { Text("Radius (mm)") },
+                    label = { Text("Radius ($unitLabel)") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
@@ -1507,9 +1537,10 @@ private fun FilletRadiusDialog(error: String?, onConfirm: (radiusMm: Double) -> 
 @Composable
 private fun OptionalDistanceDialog(
     title: String,
-    asIsMm: Float,
+    asIsDisplay: Float,
+    unitLabel: String,
     fieldLabel: String,
-    onSetExact: (mm: Double) -> Unit,
+    onSetExact: (value: Double) -> Unit,
     onUseAsIs: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -1530,7 +1561,7 @@ private fun OptionalDistanceDialog(
         text = {
             Column {
                 Text(
-                    "As tapped: ~${trimNum(asIsMm.toDouble())}mm. Type an exact value to override it, or use it as tapped.",
+                    "As tapped: ~${trimNum(asIsDisplay.toDouble())}$unitLabel. Type an exact value to override it, or use it as tapped.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
                 )
                 OutlinedTextField(
@@ -1561,10 +1592,11 @@ private fun OptionalDistanceDialog(
  */
 @Composable
 private fun LineFinishDialog(
-    asIsMm: Float,
+    asIsDisplay: Float,
+    unitLabel: String,
     asIsAngleDeg: Float,
     showAngleField: Boolean,
-    onApply: (mm: Double?, angleDeg: Float?) -> Unit,
+    onApply: (value: Double?, angleDeg: Float?) -> Unit,
     onUseAsIs: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -1585,13 +1617,13 @@ private fun LineFinishDialog(
         },
         text = {
             Column {
-                val asTapped = "As tapped: ~${trimNum(asIsMm.toDouble())}mm" +
+                val asTapped = "As tapped: ~${trimNum(asIsDisplay.toDouble())}$unitLabel" +
                     (if (showAngleField) " at ${trimNum(asIsAngleDeg.toDouble())}°" else "") +
                     ". Type exact values to override, or use it as tapped."
                 Text(asTapped, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 OutlinedTextField(
                     value = lengthText, onValueChange = { lengthText = it; error = null }, singleLine = true,
-                    label = { Text("Exact length (mm) — optional") },
+                    label = { Text("Exact length ($unitLabel) — optional") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
@@ -1609,13 +1641,13 @@ private fun LineFinishDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                val mm = if (lengthText.isBlank()) null else lengthText.toDoubleOrNull()
+                val value = if (lengthText.isBlank()) null else lengthText.toDoubleOrNull()
                 val angle = if (angleText.isBlank()) null else angleText.toFloatOrNull()
                 when {
-                    lengthText.isNotBlank() && mm == null -> error = "Enter a valid length"
+                    lengthText.isNotBlank() && value == null -> error = "Enter a valid length"
                     angleText.isNotBlank() && angle == null -> error = "Enter a valid angle"
-                    mm == null && angle == null -> onUseAsIs()
-                    else -> onApply(mm, angle)
+                    value == null && angle == null -> onUseAsIs()
+                    else -> onApply(value, angle)
                 }
             }) { Text("Apply") }
         },
@@ -1624,10 +1656,12 @@ private fun LineFinishDialog(
 }
 
 @Composable
-private fun ShapeEditDialog(shape: SketchShape, onConfirm: (SketchShape) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
+private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (SketchShape) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
     when (shape.kind) {
         ShapeKind.LINE -> {
-            var text by remember { mutableStateOf(if (shape.realLength > 0) trimNum(shape.realLength) else "") }
+            var text by remember {
+                mutableStateOf(if (shape.realLength > 0) trimNum(mmToDisplay(shape.realLength, unitLabel)) else "")
+            }
             var showHandwrite by remember { mutableStateOf(false) }
             if (showHandwrite) {
                 HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
@@ -1639,7 +1673,7 @@ private fun ShapeEditDialog(shape: SketchShape, onConfirm: (SketchShape) -> Unit
                     Column {
                         OutlinedTextField(
                             value = text, onValueChange = { text = it }, singleLine = true,
-                            label = { Text("Real length (mm)") },
+                            label = { Text("Real length ($unitLabel)") },
                             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -1649,7 +1683,7 @@ private fun ShapeEditDialog(shape: SketchShape, onConfirm: (SketchShape) -> Unit
                 confirmButton = {
                     TextButton(onClick = {
                         val v = text.toDoubleOrNull()
-                        if (v != null && v > 0) onConfirm(shape.copy(realLength = v, confirmed = true))
+                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true))
                         else onConfirm(shape.copy(confirmed = false))
                     }) { Text("Confirm") }
                 },
@@ -1686,6 +1720,7 @@ private enum class PlanMode { RECTANGLE, CONTINUOUS }
  */
 @Composable
 private fun RoomPlanDialog(
+    unitLabel: String,
     onConfirmRectangle: (length: Double, width: Double, wall: Double) -> Unit,
     onConfirmContinuous: (command: String, wall: Double) -> String?,
     onDismiss: () -> Unit
@@ -1694,7 +1729,8 @@ private fun RoomPlanDialog(
     var length by remember { mutableStateOf("") }
     var width by remember { mutableStateOf("") }
     var command by remember { mutableStateOf("") }
-    var wall by remember { mutableStateOf("115") }
+    // A typical brick-wall thickness, expressed in whichever unit this work uses.
+    var wall by remember { mutableStateOf(if (unitLabel == "cm") "11.5" else "115") }
     var error by remember { mutableStateOf<String?>(null) }
     val decimalOpts = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal)
 
@@ -1716,13 +1752,13 @@ private fun RoomPlanDialog(
                         modifier = Modifier.padding(top = 8.dp)
                     )
                     OutlinedTextField(value = length, onValueChange = { length = it; error = null }, singleLine = true,
-                        label = { Text("Length (mm)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                        label = { Text("Length ($unitLabel)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
                     OutlinedTextField(value = width, onValueChange = { width = it; error = null }, singleLine = true,
-                        label = { Text("Width (mm)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                        label = { Text("Width ($unitLabel)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 } else {
                     Text(
                         "R = right wall, B = bottom, L = left, T = top. Number after each letter is that " +
-                            "wall's length in mm. Example: R500 B200 L300 T200",
+                            "wall's length in $unitLabel. Example: R500 B200 L300 T200",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 8.dp)
                     )
@@ -1730,7 +1766,7 @@ private fun RoomPlanDialog(
                         label = { Text("Walk, e.g. R500 B200 L300 T200") }, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
                 }
                 OutlinedTextField(value = wall, onValueChange = { wall = it; error = null }, singleLine = true,
-                    label = { Text("Wall thickness (mm)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                    label = { Text("Wall thickness ($unitLabel)") }, keyboardOptions = decimalOpts, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
             }
         },
@@ -1807,6 +1843,12 @@ private fun distToSegment(p: Offset, a: Offset, b: Offset): Float {
     val projX = a.x + t * dx; val projY = a.y + t * dy
     return hypotF(p.x - projX, p.y - projY)
 }
+
+// Every SketchShape.realLength (and every pixel-derived distance) is always stored/computed in
+// millimetres internally, regardless of the work's display unit — these two just convert at the
+// UI boundary, so DXF export and the mm-based scale math never need to know a work is in cm.
+private fun mmToDisplay(mm: Double, unit: String): Double = if (unit == "cm") mm / 10.0 else mm
+private fun displayToMm(display: Double, unit: String): Double = if (unit == "cm") display * 10.0 else display
 
 private fun trimNum(v: Double): String =
     if (v == v.toLong().toDouble()) v.toLong().toString() else "%.2f".format(v)

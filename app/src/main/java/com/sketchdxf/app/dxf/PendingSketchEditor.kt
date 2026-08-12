@@ -19,6 +19,9 @@ object PendingSketchEditor {
     /** Previous DXF/preview files to delete once the new ones are written (edit-and-resave). */
     @Volatile var oldDxfPath: String = ""
     @Volatile var oldPreviewPath: String = ""
+    /** "mm" or "cm". Defaults to "cm" for a brand-new work; opening an existing one passes its
+     *  own stored unit instead, so already-saved dimensions keep reading the way they were typed. */
+    @Volatile var unit: String = "cm"
 
     fun set(
         workId: Long,
@@ -28,7 +31,8 @@ object PendingSketchEditor {
         shapes: List<SketchShape>,
         sources: List<SketchSource>,
         oldDxfPath: String = "",
-        oldPreviewPath: String = ""
+        oldPreviewPath: String = "",
+        unit: String = "cm"
     ) {
         this.workId = workId
         this.createdAt = createdAt
@@ -38,5 +42,6 @@ object PendingSketchEditor {
         this.sources = sources
         this.oldDxfPath = oldDxfPath
         this.oldPreviewPath = oldPreviewPath
+        this.unit = unit
     }
 }

@@ -92,7 +92,7 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
             PendingSketchEditor.set(
                 workId = w.id, createdAt = w.createdAt, name = w.name,
                 baseImagePath = null, shapes = shapes, sources = sources,
-                oldDxfPath = w.dxfPath, oldPreviewPath = w.previewPath
+                oldDxfPath = w.dxfPath, oldPreviewPath = w.previewPath, unit = w.unit
             )
             onEdit()
         }
