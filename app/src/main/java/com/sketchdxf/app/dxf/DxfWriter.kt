@@ -1,6 +1,7 @@
 package com.sketchdxf.app.dxf
 
 import com.sketchdxf.app.data.ShapeKind
+import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import java.io.File
 import kotlin.math.hypot
@@ -43,7 +44,12 @@ object DxfWriter {
 
         // Flip Y (screen space grows downward, DXF space grows upward) around the drawing's
         // own top edge, so the exported drawing isn't mirrored vertically.
-        val maxY = shapes.maxOf { maxOf(it.y1, it.y2, it.cy + it.r) }.toDouble()
+        val maxY = shapes.maxOf { s ->
+            val pathMaxY = if (s.kind == ShapeKind.FREEHAND) {
+                SketchPath.parse(s.path).maxOfOrNull { it.second } ?: Float.NEGATIVE_INFINITY
+            } else Float.NEGATIVE_INFINITY
+            maxOf(s.y1, s.y2, s.cy + s.r, pathMaxY)
+        }.toDouble()
         fun sx(x: Float) = x * scale
         fun sy(y: Float) = (maxY - y) * scale
 
@@ -72,6 +78,9 @@ object DxfWriter {
                     val entities = mutableListOf<Entity>(Entity.Line(x1, y1, x2, y2))
                     if (s.label.isNotBlank()) entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, 2.5, s.label))
                     entities
+                }
+                ShapeKind.FREEHAND -> SketchPath.parse(s.path).zipWithNext { (ax, ay), (bx, by) ->
+                    Entity.Line(sx(ax), sy(ay), sx(bx), sy(by))
                 }
                 else -> emptyList()
             }

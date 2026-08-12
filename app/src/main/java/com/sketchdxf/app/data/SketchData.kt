@@ -37,12 +37,15 @@ object ShapeKind {
     const val TEXT = "TEXT"
     /** A linear/aligned dimension annotation: x1,y1 -> x2,y2 with [SketchShape.label] as its text. */
     const val DIMENSION = "DIMENSION"
+    /** A hand-drawn (pencil) stroke: an arbitrary point path stored in [SketchShape.path]. */
+    const val FREEHAND = "FREEHAND"
 }
 
 /**
- * One editable vector primitive inside a work's editor canvas — a line, circle, or text label.
- * Coordinates are in the editor's own canvas-pixel space (see SketchEditorScreen), not a
- * physical unit; [realLength] (mm) is only meaningful once [confirmed] is set on a LINE.
+ * One editable vector primitive inside a work's editor canvas — a line, circle, text label,
+ * dimension, or freehand stroke. Coordinates are in the editor's own canvas-pixel space (see
+ * SketchEditorScreen), not a physical unit; [realLength] (mm) is only meaningful once
+ * [confirmed] is set on a LINE.
  */
 @Entity(tableName = "sketch_shapes")
 data class SketchShape(
@@ -58,8 +61,26 @@ data class SketchShape(
     val r: Float = 0f,
     val label: String = "",
     val realLength: Double = 0.0,
-    val confirmed: Boolean = false
+    val confirmed: Boolean = false,
+    /** FREEHAND only: the stroke's points as "x,y;x,y;x,y…" — see [SketchPath]. */
+    val path: String = ""
 )
+
+/** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips
+ *  through Room without a type converter. */
+object SketchPath {
+    fun parse(path: String): List<Pair<Float, Float>> =
+        if (path.isBlank()) emptyList()
+        else path.split(';').mapNotNull { pair ->
+            val parts = pair.split(',')
+            if (parts.size != 2) return@mapNotNull null
+            val x = parts[0].toFloatOrNull() ?: return@mapNotNull null
+            val y = parts[1].toFloatOrNull() ?: return@mapNotNull null
+            x to y
+        }
+
+    fun serialize(points: List<Pair<Float, Float>>): String = points.joinToString(";") { (x, y) -> "$x,$y" }
+}
 
 @Dao
 interface SketchDao {

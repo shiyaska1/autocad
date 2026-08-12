@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import com.sketchdxf.app.data.ShapeKind
+import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import java.io.File
 import java.io.FileOutputStream
@@ -40,6 +41,10 @@ object PreviewRenderer {
                     minX = min(minX, min(s.x1, s.x2)); maxX = max(maxX, max(s.x1, s.x2))
                     minY = min(minY, min(s.y1, s.y2)); maxY = max(maxY, max(s.y1, s.y2))
                 }
+                ShapeKind.FREEHAND -> SketchPath.parse(s.path).forEach { (x, y) ->
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
             }
         }
         val w = (maxX - minX).coerceAtLeast(1f)
@@ -74,6 +79,10 @@ object PreviewRenderer {
                         val my = (py(s.y1) + py(s.y2)) / 2f
                         canvas.drawText(s.label, mx + 4f, my - 4f, Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = 20f; isAntiAlias = true })
                     }
+                }
+                ShapeKind.FREEHAND -> {
+                    val pts = SketchPath.parse(s.path)
+                    pts.zipWithNext { (ax, ay), (bx, by) -> canvas.drawLine(px(ax), py(ay), px(bx), py(by), linePaint) }
                 }
             }
         }
