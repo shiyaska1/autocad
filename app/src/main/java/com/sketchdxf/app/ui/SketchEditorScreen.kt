@@ -144,7 +144,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -315,6 +315,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // sharp corner; a positive radius rounds the corner with a tangent arc of that radius.
     var filletIndex1 by remember { mutableStateOf(-1) }
     var filletIndex2 by remember { mutableStateOf(-1) }
+    // 3-point ARC: tap start, then a point the arc passes through, then the end point.
+    var arcP1 by remember { mutableStateOf<Offset?>(null) }
+    var arcP2 by remember { mutableStateOf<Offset?>(null) }
     var filletTap1 by remember { mutableStateOf<Offset?>(null) }
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
@@ -345,6 +348,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         stretchPoints.clear()
         stretchDragStart = null; stretchDragCurrent = null; stretchBasePoint = null
         stretchDirection = Offset.Zero; stretchAppliedPx = 0f; showStretchExactDialog = false
+        arcP1 = null; arcP2 = null
     }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
@@ -389,10 +393,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return best
     }
 
-    /** Points sampled along an ARC shape's actual (minor) sweep — used for hit-testing, bounds,
-     *  and the box-select move-preview ghost, the same way FREEHAND uses its stored path. */
+    /** Points sampled along an ARC shape's actual sweep (minor or major, per [SketchShape.major])
+     *  — used for hit-testing, bounds, and the box-select move-preview ghost, the same way
+     *  FREEHAND uses its stored path. */
     fun arcPoints(s: SketchShape, steps: Int = 16): List<Offset> {
-        val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+        val (startDeg, sweepDeg) = SketchArc.sweepFor(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2, s.major)
         return (0..steps).map { i ->
             val ang = Math.toRadians((startDeg + sweepDeg * i / steps).toDouble())
             Offset(s.cx + s.r * cos(ang).toFloat(), s.cy + s.r * sin(ang).toFloat())
@@ -1077,6 +1082,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             "O", "OFFSET" -> tool = Tool.OFFSET
             "TR", "TRIM" -> tool = Tool.TRIM
             "EX", "EXTEND" -> tool = Tool.EXTEND
+            "A", "ARC" -> tool = Tool.ARC
             "P", "PAN" -> tool = Tool.PAN
             "FH", "FREEHAND", "PENCIL" -> tool = Tool.FREEHAND
             "SEL", "SELECT", "S" -> tool = Tool.SELECT
@@ -1158,6 +1164,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (tool == Tool.EXTEND) resetToolState()
                     tool = Tool.EXTEND
                 }, label = { Text("Extend") })
+                FilterChip(selected = tool == Tool.ARC, onClick = {
+                    tool = Tool.ARC; resetToolState()
+                }, label = { Text("Arc") })
                 FilterChip(selected = tool == Tool.PAN, onClick = {
                     tool = Tool.PAN; resetToolState()
                 }, label = { Text("Pan/Zoom") })
@@ -1243,6 +1252,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.EXTEND && extendMessage != null -> extendMessage!!
                     tool == Tool.EXTEND && extendBoundaryIndex < 0 -> "Tap the boundary line"
                     tool == Tool.EXTEND -> "Tap a line near the end that should reach the boundary"
+                    tool == Tool.ARC && arcP1 == null -> "Tap the arc's start point"
+                    tool == Tool.ARC && arcP2 == null -> "Tap a point the arc should pass through"
+                    tool == Tool.ARC -> "Tap the arc's end point"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -1361,6 +1373,33 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             pendingDimension = start to end
                                         }
                                         dimStartPoint = null
+                                    }
+                                })
+                                Tool.ARC -> detectTapGestures(onTap = { p ->
+                                    val snapped = trySnapPoint(p)
+                                    val p1 = arcP1; val p2 = arcP2
+                                    when {
+                                        p1 == null -> arcP1 = snapped
+                                        p2 == null -> arcP2 = snapped
+                                        else -> {
+                                            val center = SketchArc.circumcenter(p1.x, p1.y, p2.x, p2.y, snapped.x, snapped.y)
+                                            if (center == null) {
+                                                commandFeedback = "Those 3 points are in a line — pick a different middle point"
+                                            } else {
+                                                val (cx, cy) = center
+                                                val r = hypotF(p1.x - cx, p1.y - cy)
+                                                val major = !SketchArc.minorArcContains(cx, cy, p1.x, p1.y, snapped.x, snapped.y, p2.x, p2.y)
+                                                pushUndo()
+                                                shapes.add(
+                                                    SketchShape(
+                                                        workId = 0, kind = ShapeKind.ARC, cx = cx, cy = cy, r = r,
+                                                        x1 = p1.x, y1 = p1.y, x2 = snapped.x, y2 = snapped.y,
+                                                        major = major, color = currentColor?.toArgb()
+                                                    )
+                                                )
+                                            }
+                                            arcP1 = null; arcP2 = null
+                                        }
                                     }
                                 })
                                 Tool.SELECT -> detectTapGestures(onTap = { p ->
@@ -1586,7 +1625,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     }
                                 }
                                 ShapeKind.ARC -> {
-                                    val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+                                    val (startDeg, sweepDeg) = SketchArc.sweepFor(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2, s.major)
                                     drawArc(
                                         color = shapeColor(s, linePaint, isHighlighted),
                                         startAngle = startDeg, sweepAngle = sweepDeg, useCenter = false,
@@ -1644,6 +1683,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             drawCircle(Color(0xFFE65100), radius = 8f, center = p)
                         }
                         stretchBasePoint?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
+                        arcP1?.let { p ->
+                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                        }
+                        arcP2?.let { p ->
                             drawCircle(Color(0xFFE65100), radius = 8f, center = p)
                         }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {

@@ -89,9 +89,12 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
         val w = work ?: return
         scope.launch {
             val shapes = dao.shapesFor(w.id)
+            // Re-attach the original reference photo (if any) so continuing a sketch still shows
+            // the background it was traced from, instead of a blank canvas.
+            val bg = sources.firstOrNull { it.mime.startsWith("image/") }?.path
             PendingSketchEditor.set(
                 workId = w.id, createdAt = w.createdAt, name = w.name,
-                baseImagePath = null, shapes = shapes, sources = sources,
+                baseImagePath = bg, shapes = shapes, sources = sources,
                 oldDxfPath = w.dxfPath, oldPreviewPath = w.previewPath, unit = w.unit
             )
             onEdit()

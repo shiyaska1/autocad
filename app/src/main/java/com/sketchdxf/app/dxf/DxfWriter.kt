@@ -100,6 +100,7 @@ object DxfWriter {
                     var sweep = (a2 - a1) % 360.0
                     if (sweep > 180.0) sweep -= 360.0
                     if (sweep < -180.0) sweep += 360.0
+                    if (s.major) sweep = if (sweep >= 0.0) sweep - 360.0 else sweep + 360.0
                     val (start50, end51) = if (sweep >= 0.0) a1 to (a1 + sweep) else (a1 + sweep) to a1
                     fun norm360(d: Double) = ((d % 360.0) + 360.0) % 360.0
                     listOf(Entity.Arc(dxfCx, dxfCy, dxfR, norm360(start50), norm360(end51), s.color))

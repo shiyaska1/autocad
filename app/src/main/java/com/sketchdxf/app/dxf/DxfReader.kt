@@ -88,13 +88,17 @@ object DxfReader {
                         "ARC" -> {
                             val cx = d(10) * mmPerUnit; val cy = d(20) * mmPerUnit; val r = d(40) * mmPerUnit
                             val startRad = Math.toRadians(d(50)); val endRad = Math.toRadians(d(51))
+                            // DXF ARC always sweeps CCW from angle 50 to 51 — over 180° means it's
+                            // the major arc between the two boundary points, not the minor one.
+                            var sweepDeg = (d(51) - d(50)) % 360.0
+                            if (sweepDeg < 0.0) sweepDeg += 360.0
                             shapes.add(
                                 SketchShape(
                                     workId = 0, kind = ShapeKind.ARC,
                                     cx = cx.toFloat(), cy = cy.toFloat(), r = r.toFloat(),
                                     x1 = (cx + r * cos(startRad)).toFloat(), y1 = (cy + r * sin(startRad)).toFloat(),
                                     x2 = (cx + r * cos(endRad)).toFloat(), y2 = (cy + r * sin(endRad)).toFloat(),
-                                    color = color
+                                    color = color, major = sweepDeg > 180.0
                                 )
                             )
                         }

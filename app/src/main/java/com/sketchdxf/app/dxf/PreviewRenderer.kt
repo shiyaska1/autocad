@@ -95,7 +95,7 @@ object PreviewRenderer {
                     pts.zipWithNext { (ax, ay), (bx, by) -> canvas.drawLine(px(ax), py(ay), px(bx), py(by), paint) }
                 }
                 ShapeKind.ARC -> {
-                    val (startDeg, sweepDeg) = SketchArc.minorSweep(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2)
+                    val (startDeg, sweepDeg) = SketchArc.sweepFor(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2, s.major)
                     val oval = RectF(px(s.cx - s.r), py(s.cy - s.r), px(s.cx + s.r), py(s.cy + s.r))
                     canvas.drawArc(oval, startDeg, sweepDeg, false, paintFor(s, linePaint))
                 }

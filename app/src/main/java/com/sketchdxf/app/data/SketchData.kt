@@ -80,7 +80,12 @@ data class SketchShape(
     val path: String = "",
     /** Explicit ARGB colour (from Color.toArgb()), or null to use this shape kind's usual default
      *  (e.g. green when a LINE is confirmed, blue otherwise) — see SketchEditorScreen's colour picker. */
-    val color: Int? = null
+    val color: Int? = null,
+    /** ARC only: false draws the shorter (minor) arc between x1,y1 and x2,y2 around the centre —
+     *  true draws the longer (major) one instead. Fillet/Extend-generated arcs are always minor
+     *  (the default); a 3-point ARC tool pick can need either, decided by which side of the
+     *  chord its middle point fell on — see [SketchArc.minorArcContains]. */
+    val major: Boolean = false
 )
 
 /** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips
@@ -119,6 +124,39 @@ object SketchArc {
         if (sweep > 180f) sweep -= 360f
         if (sweep < -180f) sweep += 360f
         return a1 to sweep
+    }
+
+    /** (startAngleDeg, sweepDeg) honouring [SketchShape.major]: the minor arc as-is, or its
+     *  complement — same start angle, the other way round, magnitude 360° minus the minor sweep. */
+    fun sweepFor(cx: Float, cy: Float, x1: Float, y1: Float, x2: Float, y2: Float, major: Boolean): Pair<Float, Float> {
+        val (start, minor) = minorSweep(cx, cy, x1, y1, x2, y2)
+        if (!major) return start to minor
+        val majorSweep = if (minor >= 0f) minor - 360f else minor + 360f
+        return start to majorSweep
+    }
+
+    /** True if the point (px,py) lies along the MINOR arc between (x1,y1) and (x2,y2) around the
+     *  centre, false if it lies along the major one — used to decide [SketchShape.major] when a
+     *  3-point ARC pick's middle point could be on either side of the chord. */
+    fun minorArcContains(cx: Float, cy: Float, x1: Float, y1: Float, x2: Float, y2: Float, px: Float, py: Float): Boolean {
+        val (start, sweep) = minorSweep(cx, cy, x1, y1, x2, y2)
+        val aP = angleDeg(cx, cy, px, py)
+        var rel = (aP - start) % 360f
+        if (rel > 180f) rel -= 360f
+        if (rel < -180f) rel += 360f
+        return if (sweep >= 0f) rel in 0f..sweep else rel in sweep..0f
+    }
+
+    /** Centre of the circle through 3 non-collinear points, or null if they're (near-)collinear. */
+    fun circumcenter(ax: Float, ay: Float, bx: Float, by: Float, cx: Float, cy: Float): Pair<Float, Float>? {
+        val d = 2f * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        if (kotlin.math.abs(d) < 1e-4f) return null
+        val ax2ay2 = ax * ax + ay * ay
+        val bx2by2 = bx * bx + by * by
+        val cx2cy2 = cx * cx + cy * cy
+        val ux = (ax2ay2 * (by - cy) + bx2by2 * (cy - ay) + cx2cy2 * (ay - by)) / d
+        val uy = (ax2ay2 * (cx - bx) + bx2by2 * (ax - cx) + cx2cy2 * (bx - ax)) / d
+        return ux to uy
     }
 }
 
