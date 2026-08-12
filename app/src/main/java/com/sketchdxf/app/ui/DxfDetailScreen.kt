@@ -45,10 +45,15 @@ import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.DownloadSaver
 import com.sketchdxf.app.data.SketchSource
 import com.sketchdxf.app.data.SketchWork
+import com.sketchdxf.app.dxf.PdfPageRenderer
 import com.sketchdxf.app.dxf.PendingSketchEditor
+import com.sketchdxf.app.dxf.SketchAttachmentStore
 import com.sketchdxf.app.ui.common.ImageViewerDialog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,9 +94,12 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
         val w = work ?: return
         scope.launch {
             val shapes = dao.shapesFor(w.id)
-            // Re-attach the original reference photo (if any) so continuing a sketch still shows
-            // the background it was traced from, instead of a blank canvas.
-            val bg = sources.firstOrNull { it.mime.startsWith("image/") }?.path
+            // Re-attach the original reference photo/PDF page (if any) so continuing a sketch
+            // still shows the background it was traced from, instead of a blank canvas. A PDF
+            // source has no ready-made background bitmap (only the original PDF was kept) — its
+            // first page has to be re-rendered the same way DxfHomeScreen did when the sketch was
+            // first created.
+            val bg = withContext(Dispatchers.Default) { rebuildBackgroundPath(context, sources) }
             PendingSketchEditor.set(
                 workId = w.id, createdAt = w.createdAt, name = w.name,
                 baseImagePath = bg, shapes = shapes, sources = sources,
@@ -161,4 +169,16 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
             }
         }
     }
+}
+
+/** Recovers a background bitmap path for re-opening a saved sketch: an image source's own path
+ *  works as-is, but a PDF source only ever kept the original PDF — its first page is re-rendered
+ *  into a fresh PNG the same way DxfHomeScreen does when a sketch is first created. */
+private suspend fun rebuildBackgroundPath(context: android.content.Context, sources: List<SketchSource>): String? {
+    sources.firstOrNull { it.mime.startsWith("image/") }?.let { return it.path }
+    val pdfSource = sources.firstOrNull { it.mime.contains("pdf") || it.name.endsWith(".pdf", ignoreCase = true) } ?: return null
+    val bitmap = PdfPageRenderer.renderPages(context, android.net.Uri.fromFile(File(pdfSource.path)), targetWidth = 1600).firstOrNull() ?: return null
+    val baseFile = SketchAttachmentStore.newFile(context, "base", "png")
+    FileOutputStream(baseFile).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+    return baseFile.absolutePath
 }
