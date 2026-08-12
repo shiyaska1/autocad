@@ -3,6 +3,7 @@ package com.sketchdxf.app.dxf
 import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
+import java.io.BufferedReader
 import java.io.File
 import kotlin.math.cos
 import kotlin.math.sin
@@ -15,6 +16,13 @@ import kotlin.math.sin
  * erroring, so a more complex external file just imports the parts this app understands,
  * reported via [Result.skippedTypes].
  *
+ * Reads the file as a stream (one group-code/value pair at a time, one entity's fields held at
+ * once) rather than loading it whole — a real-world DXF exported from desktop CAD can be tens of
+ * megabytes of largely LWPOLYLINE vertex data, and materialising that as a `List<String>` plus a
+ * parallel `List<Pair<Int,String>>` easily doubles or triples it in memory, enough to exhaust a
+ * phone's heap on an otherwise perfectly valid file (which used to surface here as a misleading
+ * "not a valid DXF" — see [read]'s OutOfMemoryError handling).
+ *
  * Coordinates come back in the file's own space (millimetres, after applying \$INSUNITS if
  * present) — placing them into the editor's canvas-pixel space, including the Y-flip DXF's
  * Y-up convention needs, is the caller's job (see SketchEditorScreen's DXF import).
@@ -23,53 +31,68 @@ object DxfReader {
 
     data class Result(val shapes: List<SketchShape>, val skippedTypes: Set<String>)
 
-    fun read(file: File): Result = parse(file.readLines())
+    /** Thrown (instead of a generic parse failure) when the file ran the device out of memory,
+     *  so the caller can tell the user what actually happened. */
+    class TooLargeException(cause: Throwable) : Exception(cause)
 
-    private fun parse(lines: List<String>): Result {
-        // DXF is a flat stream of (group code, value) line pairs.
-        val pairs = ArrayList<Pair<Int, String>>(lines.size / 2)
-        var i = 0
-        while (i + 1 < lines.size) {
-            val code = lines[i].trim().toIntOrNull()
-            if (code != null) pairs.add(code to lines[i + 1].trim())
-            i += 2
+    fun read(file: File): Result {
+        try {
+            return file.bufferedReader().use { parse(it) }
+        } catch (e: OutOfMemoryError) {
+            throw TooLargeException(e)
         }
+    }
 
+    private fun parse(reader: BufferedReader): Result {
         var mmPerUnit = 1.0
-        for (idx in pairs.indices) {
-            if (pairs[idx].first == 9 && pairs[idx].second == "\$INSUNITS") {
-                mmPerUnit = when (pairs.getOrNull(idx + 1)?.second?.toIntOrNull()) {
-                    1 -> 25.4    // inches
-                    2 -> 304.8   // feet
-                    5 -> 10.0    // centimetres
-                    6 -> 1000.0  // metres
-                    else -> 1.0  // 4 = millimetres, or unspecified — assume mm
-                }
-                break
+        val shapes = mutableListOf<SketchShape>()
+        val skipped = mutableSetOf<String>()
+
+        // Reads one (group code, value) line pair, or null at end of file.
+        fun readPair(): Pair<Int, String>? {
+            while (true) {
+                val codeLine = reader.readLine() ?: return null
+                val valueLine = reader.readLine() ?: return null
+                val code = codeLine.trim().toIntOrNull() ?: continue
+                return code to valueLine.trim()
             }
         }
 
-        val shapes = mutableListOf<SketchShape>()
-        val skipped = mutableSetOf<String>()
+        var awaitingInsunits = false
         var inEntities = false
-        var idx = 0
-        while (idx < pairs.size) {
-            val (code, value) = pairs[idx]
+        var pair = readPair()
+        while (pair != null) {
+            val (code, value) = pair
             when {
-                code == 2 && value == "ENTITIES" -> { inEntities = true; idx++ }
-                code == 0 && value == "ENDSEC" -> { inEntities = false; idx++ }
+                code == 9 && value == "\$INSUNITS" -> { awaitingInsunits = true; pair = readPair() }
+                awaitingInsunits && code == 70 -> {
+                    mmPerUnit = when (value.toIntOrNull()) {
+                        1 -> 25.4    // inches
+                        2 -> 304.8   // feet
+                        5 -> 10.0    // centimetres
+                        6 -> 1000.0  // metres
+                        else -> 1.0  // 4 = millimetres, or unspecified — assume mm
+                    }
+                    awaitingInsunits = false
+                    pair = readPair()
+                }
+                code == 2 && value == "ENTITIES" -> { inEntities = true; pair = readPair() }
+                code == 0 && value == "ENDSEC" -> { inEntities = false; pair = readPair() }
                 inEntities && code == 0 -> {
-                    var j = idx + 1
+                    // Gather this one entity's fields until the next code-0 pair (the next
+                    // entity, or a section boundary) — bounded by one entity's size, not the file.
+                    val entityType = value
                     val fields = mutableMapOf<Int, MutableList<String>>()
-                    while (j < pairs.size && pairs[j].first != 0) {
-                        fields.getOrPut(pairs[j].first) { mutableListOf() }.add(pairs[j].second)
-                        j++
+                    var next = readPair()
+                    while (next != null && next.first != 0) {
+                        fields.getOrPut(next.first) { mutableListOf() }.add(next.second)
+                        next = readPair()
                     }
                     fun d(groupCode: Int): Double = fields[groupCode]?.getOrNull(0)?.toDoubleOrNull() ?: 0.0
                     // Group 420 is a 24-bit true colour (0x00RRGGBB, no alpha channel) — OR in full
                     // opacity so it's a valid ARGB int for Compose/Android's Color.
                     val color = fields[420]?.getOrNull(0)?.toIntOrNull()?.let { (it and 0x00FFFFFF) or 0xFF000000.toInt() }
-                    when (value) {
+                    when (entityType) {
                         "LINE" -> shapes.add(
                             SketchShape(
                                 workId = 0, kind = ShapeKind.LINE,
@@ -131,11 +154,11 @@ object DxfReader {
                                 )
                             }
                         }
-                        else -> skipped.add(value)
+                        else -> skipped.add(entityType)
                     }
-                    idx = j
+                    pair = next
                 }
-                else -> idx++
+                else -> pair = readPair()
             }
         }
         return Result(shapes, skipped)

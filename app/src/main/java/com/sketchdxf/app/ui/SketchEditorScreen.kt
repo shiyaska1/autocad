@@ -911,8 +911,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }.getOrDefault(false)
         if (!copied) { dxfImportMessage = "Couldn't read that file"; return }
 
-        val result = runCatching { DxfReader.read(tempFile) }.getOrNull()
+        val outcome = runCatching { DxfReader.read(tempFile) }
         SketchAttachmentStore.delete(tempFile.absolutePath)
+        if (outcome.exceptionOrNull() is com.sketchdxf.app.dxf.DxfReader.TooLargeException) {
+            dxfImportMessage = "That file is too large to import on this device — try a smaller/simplified DXF"
+            return
+        }
+        val result = outcome.getOrNull()
         if (result == null) { dxfImportMessage = "That file doesn't look like a valid DXF"; return }
         if (result.shapes.isEmpty()) {
             dxfImportMessage = if (result.skippedTypes.isNotEmpty())
