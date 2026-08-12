@@ -59,16 +59,15 @@ object PreviewRenderer {
         val linePaint = Paint().apply { color = Color.BLACK; strokeWidth = 4f; isAntiAlias = true }
         val labelPaint = Paint().apply { color = Color.DKGRAY; textSize = 20f; isAntiAlias = true }
 
+        // Dimension text/ticks scale with the fit factor, same idea as the editor: proportional to
+        // the drawing rather than a fixed pixel size, so a big plan and a tiny detail both read right.
+        val dimTextSize = (900f * fit * 0.028f).coerceIn(14f, 34f)
+
         shapes.forEach { s ->
             when (s.kind) {
-                ShapeKind.LINE -> {
-                    canvas.drawLine(px(s.x1), py(s.y1), px(s.x2), py(s.y2), linePaint)
-                    if (s.confirmed && s.realLength > 0) {
-                        val mx = (px(s.x1) + px(s.x2)) / 2f
-                        val my = (py(s.y1) + py(s.y2)) / 2f
-                        canvas.drawText("${trimNum(s.realLength)}mm", mx + 4f, my - 4f, labelPaint)
-                    }
-                }
+                // Confirmed lines just draw normally — no automatic length label; a real-world size
+                // only ever appears where it was placed by hand with the Dimension tool.
+                ShapeKind.LINE -> canvas.drawLine(px(s.x1), py(s.y1), px(s.x2), py(s.y2), linePaint)
                 ShapeKind.CIRCLE -> canvas.drawCircle(px(s.cx), py(s.cy), s.r * fit, linePaint)
                 ShapeKind.TEXT -> if (s.label.isNotBlank()) canvas.drawText(s.label, px(s.x1), py(s.y1), labelPaint)
                 ShapeKind.DIMENSION -> {
@@ -77,7 +76,7 @@ object PreviewRenderer {
                     if (s.label.isNotBlank()) {
                         val mx = (px(s.x1) + px(s.x2)) / 2f
                         val my = (py(s.y1) + py(s.y2)) / 2f
-                        canvas.drawText(s.label, mx + 4f, my - 4f, Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = 20f; isAntiAlias = true })
+                        canvas.drawText(s.label, mx + 4f, my - 4f, Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = dimTextSize; isAntiAlias = true })
                     }
                 }
                 ShapeKind.FREEHAND -> {
@@ -92,7 +91,4 @@ object PreviewRenderer {
     fun save(bitmap: Bitmap, file: File) {
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
-
-    private fun trimNum(v: Double): String =
-        if (v == v.toLong().toDouble()) v.toLong().toString() else "%.2f".format(v)
 }

@@ -974,19 +974,30 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     ) {
                         val linePaint = Color(0xFF1565C0)
                         val highlightPaint = Color(0xFFE65100)
+                        // Dimension marks scale with the sketch's own extent instead of a fixed pixel
+                        // size, so they read right whether the drawing is a tiny detail or a full plan.
+                        val drawingExtent = if (shapes.isEmpty()) {
+                            hypotF(canvasSize.width.toFloat(), canvasSize.height.toFloat())
+                        } else {
+                            var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
+                            var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+                            shapes.forEach { s ->
+                                minX = minOf(minX, s.x1, s.x2, s.cx - s.r); maxX = maxOf(maxX, s.x1, s.x2, s.cx + s.r)
+                                minY = minOf(minY, s.y1, s.y2, s.cy - s.r); maxY = maxOf(maxY, s.y1, s.y2, s.cy + s.r)
+                            }
+                            hypotF(maxX - minX, maxY - minY)
+                        }
+                        val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
+                        val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
                         shapes.forEachIndexed { i, s ->
                             val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex || i in selectedIndices
                             when (s.kind) {
                                 ShapeKind.LINE -> {
+                                    // Confirmed lines just turn green — no automatic length label; a
+                                    // real-world size only ever appears where you place it by hand
+                                    // with the Dimension tool.
                                     val lineColor = if (isHighlighted) highlightPaint else if (s.confirmed) Color(0xFF2E7D32) else linePaint
                                     drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = if (isHighlighted) 7f else 5f)
-                                    if (s.confirmed && s.realLength > 0) {
-                                        val mx = (s.x1 + s.x2) / 2f; val my = (s.y1 + s.y2) / 2f
-                                        drawContext.canvas.nativeCanvas.drawText(
-                                            "${trimNum(s.realLength)}mm", mx + 4f, my - 4f,
-                                            android.graphics.Paint().apply { color = 0xFF2E7D32.toInt(); textSize = 30f }
-                                        )
-                                    }
                                 }
                                 ShapeKind.CIRCLE -> drawCircle(
                                     if (isHighlighted) highlightPaint else linePaint, radius = s.r, center = Offset(s.cx, s.cy),
@@ -1011,7 +1022,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     val dx = p2.x - p1.x; val dy = p2.y - p1.y
                                     val len = hypotF(dx, dy)
                                     if (len > 1e-3f) {
-                                        val nx = -dy / len * 8f; val ny = dx / len * 8f
+                                        val nx = -dy / len * dimTick; val ny = dx / len * dimTick
                                         drawLine(dimColor, Offset(p1.x - nx, p1.y - ny), Offset(p1.x + nx, p1.y + ny), strokeWidth = 3f)
                                         drawLine(dimColor, Offset(p2.x - nx, p2.y - ny), Offset(p2.x + nx, p2.y + ny), strokeWidth = 3f)
                                     }
@@ -1019,7 +1030,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
-                                            android.graphics.Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = 26f }
+                                            android.graphics.Paint().apply { color = 0xFF6A1B9A.toInt(); textSize = dimTextSize }
                                         )
                                     }
                                 }
