@@ -919,6 +919,24 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
         val result = outcome.getOrNull()
         if (result == null) { dxfImportMessage = "That file doesn't look like a valid DXF"; return }
+        if (result.usedBlocks.isNotEmpty()) {
+            // Every INSERT is already flattened into result.shapes so the drawing looks right
+            // immediately — this additionally saves each referenced block into the app's own
+            // Block library (pxPerMm = 1f: these coordinates already are millimetres) so it can
+            // be reused elsewhere, same as a block saved by hand with "Save Block".
+            scope.launch {
+                result.usedBlocks.forEach { b ->
+                    dao.insertBlock(
+                        SketchBlock(
+                            name = b.name, category = "Imported",
+                            createdAt = System.currentTimeMillis(),
+                            shapesData = SketchBlockCodec.serialize(b.entities), pxPerMm = 1f
+                        )
+                    )
+                }
+                savedBlocks = dao.allBlocks()
+            }
+        }
         if (result.shapes.isEmpty()) {
             dxfImportMessage = if (result.skippedTypes.isNotEmpty())
                 "No LINE/CIRCLE/ARC/TEXT/LWPOLYLINE entities found — only ${result.skippedTypes.joinToString()}, which isn't supported yet"
