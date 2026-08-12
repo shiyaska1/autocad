@@ -25,13 +25,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.NearMe
@@ -87,6 +90,8 @@ import androidx.compose.ui.unit.dp
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchArc
+import com.sketchdxf.app.data.SketchBlock
+import com.sketchdxf.app.data.SketchBlockCodec
 import com.sketchdxf.app.data.SketchCircleFit
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
@@ -147,7 +152,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -166,6 +171,9 @@ private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
 fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val dao = remember { AppDatabase.get(context).sketchDao() }
+    var savedBlocks by remember { mutableStateOf<List<SketchBlock>>(emptyList()) }
+    LaunchedEffect(Unit) { savedBlocks = dao.allBlocks() }
 
     var loaded by remember { mutableStateOf(false) }
     var workId by remember { mutableStateOf(0L) }
@@ -272,6 +280,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var orthoOn by remember { mutableStateOf(true) }
     var snapOn by remember { mutableStateOf(true) }
     var chainOn by remember { mutableStateOf(true) }
+    // Wall mode: each LINE drawn is treated as a wall's inside face — a second, parallel line is
+    // auto-added on the outside at the given thickness. Chained (connected) wall segments have
+    // their outside lines mitered to meet exactly at the corner instead of gapping/overlapping.
+    var wallModeOn by remember { mutableStateOf(false) }
+    var wallThickness by remember { mutableStateOf<Double?>(null) } // mm
+    var showWallThicknessDialog by remember { mutableStateOf(false) }
+    var lastWallInnerEnd by remember { mutableStateOf<Offset?>(null) }
+    var lastWallOuterIndex by remember { mutableStateOf(-1) }
     var lineStartPoint by remember { mutableStateOf<Offset?>(null) }
     var pendingLengthIndex by remember { mutableStateOf(-1) }
 
@@ -333,6 +349,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var pendingDistancePx by remember { mutableStateOf<Float?>(null) }
     var calibrationRatio by remember { mutableStateOf<Float?>(null) } // px per mm
     var useCalibrationRatio by remember { mutableStateOf(true) }
+    // Block library: save a selection as a reusable, categorised group of shapes, then drop it
+    // back in elsewhere — see SketchBlock/SketchBlockCodec.
+    var showSaveBlockDialog by remember { mutableStateOf(false) }
+    var showBlockPicker by remember { mutableStateOf(false) }
+    var pendingBlockInsert by remember { mutableStateOf<SketchBlock?>(null) }
+    var insertUseRatio by remember { mutableStateOf(true) }
     var filletTap1 by remember { mutableStateOf<Offset?>(null) }
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
@@ -365,6 +387,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         stretchDirection = Offset.Zero; stretchAppliedPx = 0f; showStretchExactDialog = false
         arcP1 = null; arcP2 = null
         distanceStart = null; pendingDistancePx = null
+        pendingBlockInsert = null
+        lastWallInnerEnd = null; lastWallOuterIndex = -1
     }
 
     /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
@@ -461,6 +485,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         else -> androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
     }
 
+    /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
+     *  fits back on screen at once. */
+    fun fitToScreen() {
+        if (shapes.isEmpty()) return
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        shapes.forEach { s ->
+            val b = shapeBounds(s)
+            minX = minOf(minX, b.left); maxX = maxOf(maxX, b.right)
+            minY = minOf(minY, b.top); maxY = maxOf(maxY, b.bottom)
+        }
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        val spanX = (maxX - minX).coerceAtLeast(1f)
+        val spanY = (maxY - minY).coerceAtLeast(1f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.5f, 6f)
+        val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
+        viewScale = scale
+        viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
+    }
+
     /** Shifts a shape by (dx, dy) in canvas-pixel space — used by group Move and by Copy's paste offset. */
     fun translateShape(s: SketchShape, dx: Float, dy: Float): SketchShape = when (s.kind) {
         ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
@@ -468,6 +513,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
         ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
         else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
+    }
+
+    /** Scales a shape's geometry (only) by [f] around the origin (0,0) — used to resize a block's
+     *  saved-relative-to-origin shapes on insert. Never touches [SketchShape.realLength] or
+     *  [SketchShape.label]: those are real-world/text data, not pixel geometry. */
+    fun scaleShape(s: SketchShape, f: Float): SketchShape = if (f == 1f) s else when (s.kind) {
+        ShapeKind.CIRCLE -> s.copy(cx = s.cx * f, cy = s.cy * f, r = s.r * f)
+        ShapeKind.TEXT -> s.copy(x1 = s.x1 * f, y1 = s.y1 * f)
+        ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x * f) to (y * f) }))
+        ShapeKind.ARC -> s.copy(cx = s.cx * f, cy = s.cy * f, r = s.r * f, x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
+        else -> s.copy(x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
     }
 
     /** Removes every selected shape, highest index first so earlier removals don't shift the rest. */
@@ -536,6 +592,39 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (abs(denom) < 1e-6f) return null
         val t = ((l1.x1 - l2.x1) * (l2.y1 - l2.y2) - (l1.y1 - l2.y1) * (l2.x1 - l2.x2)) / denom
         return Offset(l1.x1 + t * (l1.x2 - l1.x1), l1.y1 + t * (l1.y2 - l1.y1))
+    }
+
+    /** Wall mode: adds the outside-face line parallel to the just-finished inner line at
+     *  [innerIdx], offset by [wallThickness] to the right of its drawn direction (a fixed
+     *  convention — trace a room's inside perimeter the same rotational way each time and every
+     *  wall's outside line lands on the actual outside). If this segment continues the previous
+     *  wall segment (its start matches the previous inner line's end — Chain does this), the two
+     *  outside lines are mitered to meet exactly at the corner instead of leaving a gap or overlap. */
+    fun addWallOuterLine(innerIdx: Int) {
+        val inner = shapes.getOrNull(innerIdx) ?: return
+        val thickMm = wallThickness ?: return
+        val thickPx = (thickMm * currentPxPerMm()).toFloat()
+        val dx = inner.x2 - inner.x1; val dy = inner.y2 - inner.y1
+        val len = hypotF(dx, dy)
+        if (len < 1e-3f) { lastWallInnerEnd = null; lastWallOuterIndex = -1; return }
+        val nx = dy / len; val ny = -dx / len
+        var outer = SketchShape(
+            workId = 0, kind = ShapeKind.LINE,
+            x1 = inner.x1 + nx * thickPx, y1 = inner.y1 + ny * thickPx,
+            x2 = inner.x2 + nx * thickPx, y2 = inner.y2 + ny * thickPx,
+            color = currentColor?.toArgb()
+        )
+        val prevEnd = lastWallInnerEnd; val prevIdx = lastWallOuterIndex
+        if (prevEnd != null && prevIdx in shapes.indices && hypotF(inner.x1 - prevEnd.x, inner.y1 - prevEnd.y) < 2f) {
+            val prevOuter = shapes[prevIdx]
+            lineIntersection(prevOuter, outer)?.let { meet ->
+                shapes[prevIdx] = prevOuter.copy(x2 = meet.x, y2 = meet.y)
+                outer = outer.copy(x1 = meet.x, y1 = meet.y)
+            }
+        }
+        shapes.add(outer)
+        lastWallOuterIndex = shapes.lastIndex
+        lastWallInnerEnd = Offset(inner.x2, inner.y2)
     }
 
     /** Where [p] falls along the line a→b, as a fraction (0 = a, 1 = b; not clamped). */
@@ -980,14 +1069,31 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 } else {
                     cur.copy(x2 = newEnd.x, y2 = newEnd.y)
                 }
+                if (wallModeOn) addWallOuterLine(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
-            onUseAsIs = { pendingLengthIndex = -1 },
+            onUseAsIs = {
+                if (wallModeOn) addWallOuterLine(pendingLengthIndex)
+                pendingLengthIndex = -1
+            },
             onCancel = {
                 if (pendingLengthIndex in shapes.indices) shapes.removeAt(pendingLengthIndex)
                 if (undoStack.isNotEmpty()) undoStack.removeAt(undoStack.lastIndex)
                 pendingLengthIndex = -1
             }
+        )
+    }
+    if (showWallThicknessDialog) {
+        WallThicknessDialog(
+            initial = wallThickness?.let { trimNum(mmToDisplay(it, unit)) } ?: "",
+            unitLabel = unit,
+            onConfirm = { display ->
+                wallThickness = displayToMm(display.toDouble(), unit)
+                wallModeOn = true
+                lastWallInnerEnd = null; lastWallOuterIndex = -1
+                showWallThicknessDialog = false
+            },
+            onCancel = { showWallThicknessDialog = false }
         )
     }
     if (offsetNewIndex in shapes.indices && offsetOriginal != null) {
@@ -1039,6 +1145,48 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 pendingDistancePx = null
             },
             onDismiss = { pendingDistancePx = null }
+        )
+    }
+    if (showSaveBlockDialog) {
+        SaveBlockDialog(
+            existingCategories = savedBlocks.map { it.category }.distinct(),
+            onConfirm = { blockName, category ->
+                val targets = selectedIndices.mapNotNull { shapes.getOrNull(it) }
+                if (targets.isNotEmpty()) {
+                    val minX = targets.minOf { shapeBounds(it).left }
+                    val minY = targets.minOf { shapeBounds(it).top }
+                    val local = targets.map { translateShape(it, -minX, -minY) }
+                    val data = SketchBlockCodec.serialize(local)
+                    val pxPerMm = currentPxPerMm()
+                    scope.launch {
+                        dao.insertBlock(
+                            SketchBlock(
+                                name = blockName, category = category.ifBlank { "General" },
+                                createdAt = System.currentTimeMillis(), shapesData = data, pxPerMm = pxPerMm
+                            )
+                        )
+                        savedBlocks = dao.allBlocks()
+                    }
+                }
+                showSaveBlockDialog = false
+            },
+            onCancel = { showSaveBlockDialog = false }
+        )
+    }
+    if (showBlockPicker) {
+        BlockPickerDialog(
+            blocks = savedBlocks,
+            insertUseRatio = insertUseRatio,
+            onToggleUseRatio = { insertUseRatio = !insertUseRatio },
+            onPick = { block ->
+                pendingBlockInsert = block
+                tool = Tool.BLOCK
+                showBlockPicker = false
+            },
+            onDelete = { block ->
+                scope.launch { dao.deleteBlock(block); savedBlocks = dao.allBlocks() }
+            },
+            onDismiss = { showBlockPicker = false }
         )
     }
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
@@ -1149,6 +1297,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
                         IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
                         IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
+                        IconButton(onClick = { fitToScreen() }) { Icon(Icons.Filled.FitScreen, "Fit all shapes on screen") }
                         IconButton(onClick = { fullscreenCanvas = true }) { Icon(Icons.Filled.Fullscreen, "Fullscreen canvas") }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -1224,6 +1373,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }, label = { Text("Stretch") })
                 FilterChip(selected = false, onClick = { showRoomPlan = true },
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
+                FilterChip(selected = tool == Tool.BLOCK, onClick = { showBlockPicker = true },
+                    label = { Text("Block") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {
@@ -1254,6 +1405,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             label = { Text("Polyline") }
                         )
                     }
+                    FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
                     FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
                 }
             }
@@ -1264,6 +1416,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     FilterChip(selected = snapOn, onClick = { snapOn = !snapOn }, label = { Text("Snap") })
                     if (tool == Tool.LINE) FilterChip(selected = chainOn, onClick = { chainOn = !chainOn }, label = { Text("Chain") })
+                    if (tool == Tool.LINE) {
+                        FilterChip(
+                            selected = wallModeOn,
+                            onClick = {
+                                if (wallModeOn) { wallModeOn = false; lastWallInnerEnd = null; lastWallOuterIndex = -1 }
+                                else showWallThicknessDialog = true
+                            },
+                            label = { Text(if (wallModeOn) "Wall: ${trimNum(mmToDisplay(wallThickness ?: 0.0, unit))}$unit" else "Wall") }
+                        )
+                    }
                     if (tool == Tool.DIMENSION) {
                         FilterChip(selected = dimMode == DimMode.ALIGNED, onClick = { dimMode = DimMode.ALIGNED }, label = { Text("Aligned") })
                         FilterChip(selected = dimMode == DimMode.LINEAR_H, onClick = { dimMode = DimMode.LINEAR_H }, label = { Text("Linear H") })
@@ -1309,6 +1471,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.ARC -> "Tap the arc's end point"
                     tool == Tool.DISTANCE && distanceStart == null -> "Tap the first point of a known distance (e.g. on the background image)"
                     tool == Tool.DISTANCE -> "Tap the second point"
+                    tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
+                    tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -1464,6 +1628,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     } else {
                                         pendingDistancePx = hypotF(p.x - start.x, p.y - start.y)
                                         distanceStart = null
+                                    }
+                                })
+                                Tool.BLOCK -> detectTapGestures(onTap = { p ->
+                                    val block = pendingBlockInsert
+                                    if (block != null) {
+                                        val local = SketchBlockCodec.deserialize(block.shapesData)
+                                        val factor = if (insertUseRatio && block.pxPerMm > 0f) currentPxPerMm() / block.pxPerMm else 1f
+                                        pushUndo()
+                                        shapes.addAll(local.map { translateShape(scaleShape(it, factor), p.x, p.y) })
                                     }
                                 })
                                 Tool.SELECT -> detectTapGestures(onTap = { p ->
@@ -2101,6 +2274,147 @@ private fun LineFinishDialog(
             }) { Text("Apply") }
         },
         dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as tapped") } }
+    )
+}
+
+/** Asked once each time Wall mode is switched on: every LINE drawn from then on gets a second,
+ *  parallel outside-face line at this thickness — see SketchEditorScreen's addWallOuterLine. */
+@Composable
+private fun WallThicknessDialog(initial: String, unitLabel: String, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Wall thickness") },
+        text = {
+            Column {
+                Text(
+                    "Each line you draw becomes the wall's inside face — a second line is added automatically on the outside, this far away.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Thickness ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v == null || v <= 0.0) error = "Enter a valid thickness" else onConfirm(text)
+            }) { Text("Start walls") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** Asked when saving the current Box-Select selection as a reusable Block: a name plus a category
+ *  (existing categories are offered as one-tap suggestions, or type a new one). */
+@Composable
+private fun SaveBlockDialog(existingCategories: List<String>, onConfirm: (name: String, category: String) -> Unit, onCancel: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf(existingCategories.firstOrNull() ?: "") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Save as Block") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it; error = null }, singleLine = true,
+                    label = { Text("Block name") }, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = category, onValueChange = { category = it }, singleLine = true,
+                    label = { Text("Category") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                if (existingCategories.isNotEmpty()) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        existingCategories.forEach { c ->
+                            FilterChip(selected = category == c, onClick = { category = c }, label = { Text(c) })
+                        }
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (name.isBlank()) error = "Enter a name" else onConfirm(name.trim(), category.trim())
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** Search/browse saved Blocks by name or category, pick one to arm for insertion (tap the canvas
+ *  next to drop it), and choose whether it's scaled through the current calibration ratio or
+ *  inserted at the pixel size it was originally saved at. */
+@Composable
+private fun BlockPickerDialog(
+    blocks: List<SketchBlock>,
+    insertUseRatio: Boolean,
+    onToggleUseRatio: () -> Unit,
+    onPick: (SketchBlock) -> Unit,
+    onDelete: (SketchBlock) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf<String?>(null) }
+    val categories = remember(blocks) { blocks.map { it.category }.distinct() }
+    val filtered = blocks.filter {
+        (category == null || it.category == category) &&
+            (query.isBlank() || it.name.contains(query, ignoreCase = true))
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Insert Block") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it }, singleLine = true,
+                    label = { Text("Search by name") }, modifier = Modifier.fillMaxWidth()
+                )
+                if (categories.isNotEmpty()) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = category == null, onClick = { category = null }, label = { Text("All") })
+                        categories.forEach { c ->
+                            FilterChip(selected = category == c, onClick = { category = c }, label = { Text(c) })
+                        }
+                    }
+                }
+                FilterChip(
+                    selected = insertUseRatio, onClick = onToggleUseRatio,
+                    label = { Text(if (insertUseRatio) "Insert at calculated scale" else "Insert at original size") },
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Column(Modifier.fillMaxWidth().heightIn(max = 320.dp).verticalScroll(rememberScrollState()).padding(top = 8.dp)) {
+                    if (filtered.isEmpty()) {
+                        Text(
+                            if (blocks.isEmpty()) "No blocks saved yet — select shapes with Box Select, then tap Save Block."
+                            else "No blocks match",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                    filtered.forEach { b ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onPick(b) }.padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(b.name)
+                                Text(b.category, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                            IconButton(onClick = { onDelete(b) }) { Icon(Icons.Filled.Close, "Delete block") }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }
 

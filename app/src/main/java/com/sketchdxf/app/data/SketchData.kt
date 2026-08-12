@@ -35,6 +35,58 @@ data class SketchSource(
     val mime: String = ""
 )
 
+/** A reusable group of shapes ("Insert Block", AutoCAD-style) saved from a selection — a door,
+ *  window, furniture symbol, etc. Geometry in [shapesData] is relative to the block's own local
+ *  origin (0,0), so it can be dropped anywhere; [pxPerMm] records the pixel-per-mm scale that was
+ *  active in the drawing it was saved from, so a later insert can reproduce its real-world size
+ *  even in a drawing calibrated differently — see [SketchBlockCodec] and the editor's Block tool. */
+@Entity(tableName = "sketch_blocks")
+data class SketchBlock(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val category: String,
+    val createdAt: Long,
+    val shapesData: String,
+    val pxPerMm: Float
+)
+
+/** Encodes/decodes a block's shape list as plain text, the same hand-rolled way [SketchPath]
+ *  does — one shape per record, fields separated by a control character that never appears in
+ *  ordinary typed text, so no escaping is needed for the common case. */
+object SketchBlockCodec {
+    private const val FS = "\u0001"
+    private const val RS = "\u0002"
+
+    fun serialize(shapes: List<SketchShape>): String = shapes.joinToString(RS) { s ->
+        listOf(
+            s.kind, s.x1, s.y1, s.x2, s.y2, s.cx, s.cy, s.r,
+            s.label.replace(FS, " ").replace(RS, " "),
+            s.realLength, s.confirmed, s.path, s.color ?: "", s.major
+        ).joinToString(FS)
+    }
+
+    fun deserialize(text: String): List<SketchShape> {
+        if (text.isBlank()) return emptyList()
+        return text.split(RS).mapNotNull { rec ->
+            val f = rec.split(FS)
+            if (f.size < 13) return@mapNotNull null
+            SketchShape(
+                workId = 0, kind = f[0],
+                x1 = f[1].toFloatOrNull() ?: 0f, y1 = f[2].toFloatOrNull() ?: 0f,
+                x2 = f[3].toFloatOrNull() ?: 0f, y2 = f[4].toFloatOrNull() ?: 0f,
+                cx = f[5].toFloatOrNull() ?: 0f, cy = f[6].toFloatOrNull() ?: 0f,
+                r = f[7].toFloatOrNull() ?: 0f,
+                label = f[8],
+                realLength = f[9].toDoubleOrNull() ?: 0.0,
+                confirmed = f[10].toBooleanStrictOrNull() ?: false,
+                path = f[11],
+                color = f[12].toIntOrNull(),
+                major = f.getOrNull(13)?.toBooleanStrictOrNull() ?: false
+            )
+        }
+    }
+}
+
 object ShapeKind {
     const val LINE = "LINE"
     const val CIRCLE = "CIRCLE"
@@ -215,4 +267,13 @@ interface SketchDao {
 
     @Query("DELETE FROM sketch_shapes WHERE workId = :workId")
     suspend fun deleteShapesFor(workId: Long)
+
+    @Query("SELECT * FROM sketch_blocks ORDER BY category, name")
+    suspend fun allBlocks(): List<SketchBlock>
+
+    @Insert
+    suspend fun insertBlock(block: SketchBlock): Long
+
+    @Delete
+    suspend fun deleteBlock(block: SketchBlock)
 }
