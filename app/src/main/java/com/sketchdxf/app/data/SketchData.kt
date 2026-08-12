@@ -143,7 +143,12 @@ data class SketchShape(
      *  labels keep looking exactly as they always did). Feeds both the on-canvas pixel size
      *  (via currentPxPerMm()) and the exported DXF TEXT entity's height, so a size picked here
      *  actually means something in AutoCAD too, not just on this screen. */
-    val fontSize: Float = 0f
+    val fontSize: Float = 0f,
+    /** Stroke width in pixels, or 0 to use this shape kind's usual default — lets a line/circle/
+     *  arc/polyline be made thicker so it's still visible on a very large drawing zoomed far out,
+     *  where the default width can shrink to near-invisible on screen. See SketchEditorScreen's
+     *  shape-edit dialogs. */
+    val strokeWidth: Float = 0f
 )
 
 /** Encodes/decodes a [SketchShape.path] freehand point list, kept as plain text so it round-trips

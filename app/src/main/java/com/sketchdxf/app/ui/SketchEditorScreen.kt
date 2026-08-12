@@ -1068,7 +1068,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             initial = "",
             showFontSize = true,
             unitLabel = unit,
-            onConfirm = { text, _, fontSizeMm ->
+            onConfirm = { text, _, fontSizeMm, _ ->
                 if (text.isNotBlank()) {
                     pushUndo()
                     shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm))
@@ -1893,6 +1893,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         // kind's usual default; the transient highlight (active tool selection) wins over both.
                         fun shapeColor(s: SketchShape, default: Color, isHighlighted: Boolean): Color =
                             if (isHighlighted) highlightPaint else s.color?.let { Color(it) } ?: default
+                        // A shape's own explicit width (if set) always wins over the kind's usual
+                        // default; highlighting still adds its usual +2px on top either way, so a
+                        // custom-width shape still reads as selected the same as any other.
+                        fun strokeW(s: SketchShape, default: Float, isHighlighted: Boolean): Float {
+                            val base = if (s.strokeWidth > 0f) s.strokeWidth else default
+                            return if (isHighlighted) base + 2f else base
+                        }
                         shapes.forEachIndexed { i, s ->
                             val isHighlighted = i == offsetLineIndex || i == trimBoundaryIndex || i == trimTargetIndex ||
                                 i == breakLineIndex || i == filletIndex1 || i == filletIndex2 || i == extendBoundaryIndex || i in selectedIndices
@@ -1902,11 +1909,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // real-world size only ever appears where you place it by hand
                                     // with the Dimension tool.
                                     val lineColor = shapeColor(s, if (s.confirmed) Color(0xFF2E7D32) else linePaint, isHighlighted)
-                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = if (isHighlighted) 7f else 5f)
+                                    val w = strokeW(s, 5f, isHighlighted)
+                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = w)
                                 }
                                 ShapeKind.CIRCLE -> drawCircle(
                                     shapeColor(s, linePaint, isHighlighted), radius = s.r, center = Offset(s.cx, s.cy),
-                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = if (isHighlighted) 7f else 5f)
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                 )
                                 ShapeKind.TEXT -> drawContext.canvas.nativeCanvas.drawText(
                                     s.label, s.x1, s.y1,
@@ -1917,9 +1925,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 )
                                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                                     val strokeColor = shapeColor(s, linePaint, isHighlighted)
-                                    val strokeWidth = if (isHighlighted) 6f else 4f
+                                    val strokeWidthPx = strokeW(s, 4f, isHighlighted)
                                     SketchPath.parse(s.path).zipWithNext { a, b ->
-                                        drawLine(strokeColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = strokeWidth)
+                                        drawLine(strokeColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = strokeWidthPx)
                                     }
                                 }
                                 ShapeKind.ARC -> {
@@ -1929,20 +1937,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         startAngle = startDeg, sweepAngle = sweepDeg, useCenter = false,
                                         topLeft = Offset(s.cx - s.r, s.cy - s.r),
                                         size = androidx.compose.ui.geometry.Size(s.r * 2f, s.r * 2f),
-                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = if (isHighlighted) 7f else 5f)
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                     )
                                 }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
                                     val p1 = Offset(s.x1, s.y1); val p2 = Offset(s.x2, s.y2)
-                                    drawLine(dimColor, p1, p2, strokeWidth = 3f)
+                                    val dimW = strokeW(s, 3f, isHighlighted)
+                                    drawLine(dimColor, p1, p2, strokeWidth = dimW)
                                     // small perpendicular ticks at each end, like a dimension line
                                     val dx = p2.x - p1.x; val dy = p2.y - p1.y
                                     val len = hypotF(dx, dy)
                                     if (len > 1e-3f) {
                                         val nx = -dy / len * dimTick; val ny = dx / len * dimTick
-                                        drawLine(dimColor, Offset(p1.x - nx, p1.y - ny), Offset(p1.x + nx, p1.y + ny), strokeWidth = 3f)
-                                        drawLine(dimColor, Offset(p2.x - nx, p2.y - ny), Offset(p2.x + nx, p2.y + ny), strokeWidth = 3f)
+                                        drawLine(dimColor, Offset(p1.x - nx, p1.y - ny), Offset(p1.x + nx, p1.y + ny), strokeWidth = dimW)
+                                        drawLine(dimColor, Offset(p2.x - nx, p2.y - ny), Offset(p2.x + nx, p2.y + ny), strokeWidth = dimW)
                                     }
                                     if (s.label.isNotBlank()) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
@@ -2527,6 +2536,7 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
             }
             var pickedColor by remember { mutableStateOf(shape.color?.let { Color(it) }) }
             var showHandwrite by remember { mutableStateOf(false) }
+            var widthText by remember { mutableStateOf(if (shape.strokeWidth > 0f) trimNum(shape.strokeWidth.toDouble()) else "") }
             if (showHandwrite) {
                 HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
             }
@@ -2543,14 +2553,21 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                         )
                         TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
                         ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })
+                        OutlinedTextField(
+                            value = widthText, onValueChange = { widthText = it }, singleLine = true,
+                            label = { Text("Line width (px) — optional, for visibility when zoomed out") },
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                        )
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         val v = text.toDoubleOrNull()
                         val colorArgb = pickedColor?.toArgb()
-                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb))
-                        else onConfirm(shape.copy(confirmed = false, color = colorArgb))
+                        val widthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
+                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb, strokeWidth = widthPx))
+                        else onConfirm(shape.copy(confirmed = false, color = colorArgb, strokeWidth = widthPx))
                     }) { Text("Confirm") }
                 },
                 dismissButton = {
@@ -2573,9 +2590,17 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 showColorPicker = true,
                 showFontSize = shape.kind == ShapeKind.TEXT,
                 initialFontSizeMm = shape.fontSize,
+                showStrokeWidth = shape.kind != ShapeKind.TEXT,
+                initialStrokeWidthPx = shape.strokeWidth,
                 unitLabel = unitLabel,
-                onConfirm = { text, color, fontSizeMm ->
-                    onConfirm(shape.copy(label = text, color = color?.toArgb(), fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize))
+                onConfirm = { text, color, fontSizeMm, strokeWidthPx ->
+                    onConfirm(
+                        shape.copy(
+                            label = text, color = color?.toArgb(),
+                            fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize,
+                            strokeWidth = if (shape.kind != ShapeKind.TEXT) strokeWidthPx else shape.strokeWidth
+                        )
+                    )
                 },
                 onDelete = onDelete,
                 onDismiss = onDismiss
@@ -2693,8 +2718,10 @@ private fun LabelInputDialog(
     showColorPicker: Boolean = false,
     showFontSize: Boolean = false,
     initialFontSizeMm: Float = 0f,
+    showStrokeWidth: Boolean = false,
+    initialStrokeWidthPx: Float = 0f,
     unitLabel: String = "mm",
-    onConfirm: (text: String, color: Color?, fontSizeMm: Float) -> Unit,
+    onConfirm: (text: String, color: Color?, fontSizeMm: Float, strokeWidthPx: Float) -> Unit,
     onDelete: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -2703,6 +2730,9 @@ private fun LabelInputDialog(
     var showHandwrite by remember { mutableStateOf(false) }
     var fontSizeText by remember {
         mutableStateOf(if (initialFontSizeMm > 0f) trimNum(mmToDisplay(initialFontSizeMm.toDouble(), unitLabel)) else "")
+    }
+    var widthText by remember {
+        mutableStateOf(if (initialStrokeWidthPx > 0f) trimNum(initialStrokeWidthPx.toDouble()) else "")
     }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
@@ -2725,12 +2755,21 @@ private fun LabelInputDialog(
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                 }
+                if (showStrokeWidth) {
+                    OutlinedTextField(
+                        value = widthText, onValueChange = { widthText = it }, singleLine = true,
+                        label = { Text("Line width (px) — optional, for visibility when zoomed out") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
                 val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
-                onConfirm(text, pickedColor, fontSizeMm)
+                val strokeWidthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
+                onConfirm(text, pickedColor, fontSizeMm, strokeWidthPx)
             }) { Text("Save") }
         },
         dismissButton = {
