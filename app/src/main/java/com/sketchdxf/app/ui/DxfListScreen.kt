@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -57,7 +58,7 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit) {
+fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit, onBlocks: () -> Unit) {
     val context = LocalContext.current
     val dao = remember { AppDatabase.get(context).sketchDao() }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -106,6 +107,9 @@ fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit)
             TopAppBar(
                 title = { Text("Sketch DXF") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = {
+                    IconButton(onClick = onBlocks) { Icon(Icons.Filled.Category, "Block library") }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,

@@ -13,6 +13,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import androidx.navigation.compose.rememberNavController
+import com.sketchdxf.app.ui.BlockLibraryScreen
 import com.sketchdxf.app.ui.BootScreen
 import com.sketchdxf.app.ui.DxfDetailScreen
 import com.sketchdxf.app.ui.DxfHomeScreen
@@ -51,8 +52,12 @@ private fun SketchDxfApp() {
             DxfListScreen(
                 onBack = { },
                 onNew = { nav.navigate("new") },
-                onOpen = { id -> nav.navigate("detail/$id") }
+                onOpen = { id -> nav.navigate("detail/$id") },
+                onBlocks = { nav.navigate("blocks") }
             )
+        }
+        composable("blocks") {
+            BlockLibraryScreen(onBack = { nav.popBackStack() })
         }
         composable("new") {
             DxfHomeScreen(
