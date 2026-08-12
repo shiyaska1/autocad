@@ -241,6 +241,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
     var dxfImportMessage by remember { mutableStateOf<String?>(null) }
+    // Both Cancel (the X icon) and the app bar's back arrow leave without saving — confirm first
+    // so an accidental tap can't silently discard work.
+    var showCloseConfirm by remember { mutableStateOf(false) }
 
     // Current draw colour — applies to every newly-drawn shape (Line, Circle, Rectangle,
     // Freehand, Text, Dimension, Room plan); null means "use this shape kind's usual default"
@@ -1173,6 +1176,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
     }
 
+    if (showCloseConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCloseConfirm = false },
+            title = { Text("Close without saving?") },
+            text = { Text("Any changes since your last Save will be lost.") },
+            confirmButton = {
+                TextButton(onClick = { showCloseConfirm = false; onBack() }) {
+                    Text("Close", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") } }
+        )
+    }
     if (editingIndex >= 0 && editingIndex < shapes.size) {
         ShapeEditDialog(
             shape = shapes[editingIndex],
@@ -1472,7 +1488,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             label = { Text("Name") }, modifier = Modifier.fillMaxWidth()
                         )
                     },
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    navigationIcon = { IconButton(onClick = { showCloseConfirm = true }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                     actions = {
                         IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
                         IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
@@ -1498,7 +1514,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             ) {
                 // Close/Save lead the same scrolling row as the tools instead of sitting on their
                 // own row underneath — one row of vertical space back for the canvas.
-                IconButton(onClick = onBack, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
+                IconButton(onClick = { showCloseConfirm = true }, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
                 IconButton(onClick = { save() }, enabled = !busy && loaded) {
                     if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Filled.Save, "Save")
@@ -2085,15 +2101,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                         val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
                         val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
+                        // Every width/radius/text-size literal below is in this canvas's own local
+                        // (content) space, which then gets uniformly scaled by viewScale for display
+                        // (see the graphicsLayer this Canvas sits inside). At a normal zoom that's fine,
+                        // but after zooming way out — e.g. clicking Fit Screen right after a line ends
+                        // up huge — a small fixed local width shrinks to sub-pixel on screen and
+                        // effectively disappears, while a freshly drawn shape still gets its correct
+                        // on-screen length/position (that part of the transform is just a translation +
+                        // uniform scale of two endpoints, always faithful). That combination makes newly
+                        // drawn geometry look like it never happened. minPx floors a size to a minimum
+                        // that stays visible on screen at any zoom level.
+                        val invViewScale = if (viewScale > 0.0001f) 1f / viewScale else 1f
+                        fun minPx(screenPx: Float) = screenPx * invViewScale
                         // A shape's own explicit colour (if the user picked one) always wins over the
                         // kind's usual default; the transient highlight (active tool selection) wins over both.
                         fun shapeColor(s: SketchShape, default: Color, isHighlighted: Boolean): Color =
                             if (isHighlighted) highlightPaint else s.color?.let { Color(it) } ?: default
                         // A shape's own explicit width (if set) always wins over the kind's usual
                         // default; highlighting still adds its usual +2px on top either way, so a
-                        // custom-width shape still reads as selected the same as any other.
+                        // custom-width shape still reads as selected the same as any other. Always at
+                        // least ~1.5 screen px so it can't vanish when zoomed far out.
                         fun strokeW(s: SketchShape, default: Float, isHighlighted: Boolean): Float {
-                            val base = if (s.strokeWidth > 0f) s.strokeWidth else default
+                            val base = maxOf(if (s.strokeWidth > 0f) s.strokeWidth else default, minPx(1.5f))
                             return if (isHighlighted) base + 2f else base
                         }
                         shapes.forEachIndexed { i, s ->
@@ -2116,7 +2145,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     s.label, s.x1, s.y1,
                                     android.graphics.Paint().apply {
                                         color = if (isHighlighted) 0xFFE65100.toInt() else (s.color ?: 0xFF6A1B9A.toInt())
-                                        textSize = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f
+                                        textSize = maxOf(
+                                            if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f,
+                                            minPx(10f)
+                                        )
                                     }
                                 )
                                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
@@ -2144,8 +2176,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // Extension (witness) lines from the actual measured points out to
                                     // the offset dimension line — only when there's an offset to show.
                                     if (s.dimOffset != 0f) {
-                                        drawLine(dimColor, base1, p1, strokeWidth = 1.5f)
-                                        drawLine(dimColor, base2, p2, strokeWidth = 1.5f)
+                                        val extW = minPx(1.5f)
+                                        drawLine(dimColor, base1, p1, strokeWidth = extW)
+                                        drawLine(dimColor, base2, p2, strokeWidth = extW)
                                     }
                                     drawLine(dimColor, p1, p2, strokeWidth = dimW)
                                     // small perpendicular ticks at each end, like a dimension line
@@ -2158,7 +2191,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     }
                                     if (s.label.isNotBlank()) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
-                                        val effTextSize = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else dimTextSize
+                                        val effTextSize = maxOf(
+                                            if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else dimTextSize,
+                                            minPx(10f)
+                                        )
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
                                             android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = effTextSize }
@@ -2169,59 +2205,63 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                         val s = dragStart; val c = dragCurrent
                         if (s != null && c != null) {
+                            val previewW = minPx(4f)
                             if (tool == Tool.CIRCLE) {
-                                drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+                                drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = previewW))
                             } else if (tool == Tool.RECTANGLE) {
                                 val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
                                 val gray = Color.Gray
-                                drawLine(gray, s, p2, strokeWidth = 4f); drawLine(gray, p2, c, strokeWidth = 4f)
-                                drawLine(gray, c, p4, strokeWidth = 4f); drawLine(gray, p4, s, strokeWidth = 4f)
+                                drawLine(gray, s, p2, strokeWidth = previewW); drawLine(gray, p2, c, strokeWidth = previewW)
+                                drawLine(gray, c, p4, strokeWidth = previewW); drawLine(gray, p4, s, strokeWidth = previewW)
                             }
                         }
                         lineStartPoint?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         dimStartPoint?.let { p ->
-                            drawCircle(Color(0xFF6A1B9A), radius = 8f, center = p)
+                            drawCircle(Color(0xFF6A1B9A), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         breakPoint1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         filletTap1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         filletTap2?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         stretchBasePoint?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         arcP1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         arcP2?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         distanceStart?.let { p ->
-                            drawCircle(Color(0xFF1565C0), radius = 8f, center = p)
+                            drawCircle(Color(0xFF1565C0), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
-                            freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
+                            val freehandPreviewW = minPx(4f)
+                            freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = freehandPreviewW) }
                         }
                         if (tool == Tool.SELECT) {
                             // AutoCAD-style grips: every LINE/DIMENSION endpoint is a small draggable
                             // handle — drag one to reshape just that end instead of moving the whole
                             // shape. The one currently being dragged is drawn larger and filled.
+                            val gripHalf = maxOf(6f, minPx(4f))
                             shapes.forEachIndexed { i, s ->
                                 if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
                                     listOf(1 to Offset(s.x1, s.y1), 2 to Offset(s.x2, s.y2)).forEach { (part, pt) ->
                                         val active = gripDragIndex == i && gripDragPart == part
+                                        val half = if (active) gripHalf * 1.33f else gripHalf
                                         drawRect(
                                             Color(0xFF1565C0),
-                                            topLeft = Offset(pt.x - if (active) 8f else 6f, pt.y - if (active) 8f else 6f),
-                                            size = androidx.compose.ui.geometry.Size(if (active) 16f else 12f, if (active) 16f else 12f),
+                                            topLeft = Offset(pt.x - half, pt.y - half),
+                                            size = androidx.compose.ui.geometry.Size(half * 2f, half * 2f),
                                             style = if (active) androidx.compose.ui.graphics.drawscope.Fill
-                                            else androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                                            else androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(1.5f))
                                         )
                                     }
                                 }
@@ -2233,27 +2273,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 if (s2 != null && c2 != null) {
                                     val dx = c2.x - s2.x; val dy = c2.y - s2.y
                                     val ghostColor = if (copyModeActive) Color(0xFF2E7D32) else Color.Gray
+                                    val ghostW = minPx(4f)
                                     selectedIndices.forEach { idx ->
                                         val sh = translateShape(shapes[idx], dx, dy)
                                         when (sh.kind) {
                                             ShapeKind.CIRCLE -> drawCircle(
                                                 ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy),
-                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW)
                                             )
                                             ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(sh.path).zipWithNext { a, b ->
-                                                drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
+                                                drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                             }
-                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = 4f) }
-                                            ShapeKind.TEXT -> drawCircle(ghostColor, radius = 6f, center = Offset(sh.x1, sh.y1))
-                                            else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = 4f)
+                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                            ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
+                                            else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
                                         }
                                     }
                                 }
                                 // Highlights the existing point a Snap-assisted Move/Copy drag would land on.
                                 moveSnapTarget?.let { p ->
                                     drawCircle(
-                                        Color(0xFFE65100), radius = 11f, center = p,
-                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                                        Color(0xFFE65100), radius = maxOf(11f, minPx(5f)), center = p,
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
                                     )
                                 }
                             } else {
@@ -2268,7 +2309,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     drawRect(
                                         boxColor, topLeft = topLeft, size = boxSize,
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                            width = 2f,
+                                            width = minPx(2f),
                                             pathEffect = if (isWindow) null else androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
                                         )
                                     )
@@ -2286,7 +2327,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 drawRect(
                                     stretchColor, topLeft = topLeft, size = boxSize,
                                     style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                        width = 2f, pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                                        width = minPx(2f), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
                                     )
                                 )
                             }
@@ -2297,7 +2338,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     sp.part == 0 -> Offset(s.x1, s.y1)
                                     else -> Offset(s.x2, s.y2)
                                 }
-                                drawCircle(Color(0xFFE65100), radius = 7f, center = p)
+                                drawCircle(Color(0xFFE65100), radius = maxOf(7f, minPx(4f)), center = p)
                             }
                         }
                     }
