@@ -4,9 +4,13 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,7 +62,9 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -81,6 +87,44 @@ import kotlin.math.hypot
 
 /** kotlin.math.hypot only has a (Double, Double) overload — this fills the (Float, Float) gap. */
 private fun hypotF(x: Float, y: Float): Float = hypot(x.toDouble(), y.toDouble()).toFloat()
+
+/**
+ * A trimmed-down [androidx.compose.foundation.gestures.detectTransformGestures] that, when
+ * [requireTwoFingers] is true, only reacts to 2+ simultaneous pointers and otherwise leaves
+ * single-finger events completely unconsumed — so pinch-zoom/two-finger-pan can sit "underneath"
+ * every drawing tool (Line, Freehand, Box select, …) the same way Ortho/Snap do, instead of being
+ * its own exclusive tool. With [requireTwoFingers] false (the dedicated Pan/Zoom tool), a single
+ * finger drags the view too, matching the old behaviour there.
+ */
+private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean, onGesture: (pan: Offset, zoom: Float) -> Unit) {
+    awaitEachGesture {
+        var zoom = 1f
+        var pan = Offset.Zero
+        var pastTouchSlop = false
+        val touchSlop = viewConfiguration.touchSlop
+
+        awaitFirstDown(requireUnconsumed = false)
+        do {
+            val event = awaitPointerEvent()
+            val canceled = event.changes.any { it.isConsumed }
+            if (!canceled && (!requireTwoFingers || event.changes.size >= 2)) {
+                val zoomChange = event.calculateZoom()
+                val panChange = event.calculatePan()
+                if (!pastTouchSlop) {
+                    zoom *= zoomChange
+                    pan += panChange
+                    val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                    val zoomMotion = abs(1 - zoom) * centroidSize
+                    if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) pastTouchSlop = true
+                }
+                if (pastTouchSlop) {
+                    if (zoomChange != 1f || panChange != Offset.Zero) onGesture(panChange, zoomChange)
+                    event.changes.forEach { if (it.positionChanged()) it.consume() }
+                }
+            }
+        } while (!canceled && event.changes.any { it.pressed })
+    }
+}
 
 private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT }
 private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
@@ -740,11 +784,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     .background(Color.White)
                     .onSizeChanged { canvasSize = it }
                     .pointerInput(tool) {
-                        if (tool == Tool.PAN) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                viewScale = (viewScale * zoom).coerceIn(0.5f, 6f)
-                                viewOffset += pan
-                            }
+                        // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
+                        // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
+                        detectPanOrZoom(requireTwoFingers = tool != Tool.PAN) { pan, zoom ->
+                            viewScale = (viewScale * zoom).coerceIn(0.5f, 6f)
+                            viewOffset += pan
                         }
                     }
             ) {
