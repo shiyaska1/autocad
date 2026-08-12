@@ -22,9 +22,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -2146,11 +2148,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         value = commandInput,
                         onValueChange = { commandInput = it; commandFeedback = null },
                         singleLine = true,
-                        label = { Text("Command") },
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         placeholder = { Text("L, C, FILLET, 'ORTHO …") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
                         keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).height(52.dp)
                     )
                     TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
                 }
@@ -2158,6 +2160,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
                 }
             }
+            Spacer(Modifier.height(16.dp))
 
             }
         }
