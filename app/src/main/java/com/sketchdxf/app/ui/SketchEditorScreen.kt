@@ -130,7 +130,11 @@ private fun hypotF(x: Float, y: Float): Float = hypot(x.toDouble(), y.toDouble()
  * its own exclusive tool. With [requireTwoFingers] false (the dedicated Pan/Zoom tool), a single
  * finger drags the view too, matching the old behaviour there.
  */
-private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean, onGesture: (pan: Offset, zoom: Float) -> Unit) {
+private suspend fun PointerInputScope.detectPanOrZoom(
+    requireTwoFingers: Boolean,
+    onGestureStart: () -> Unit = {},
+    onGesture: (pan: Offset, zoom: Float) -> Unit
+) {
     awaitEachGesture {
         var zoom = 1f
         var pan = Offset.Zero
@@ -149,7 +153,10 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
                     pan += panChange
                     val centroidSize = event.calculateCentroidSize(useCurrent = false)
                     val zoomMotion = abs(1 - zoom) * centroidSize
-                    if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) pastTouchSlop = true
+                    if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) {
+                        pastTouchSlop = true
+                        onGestureStart()
+                    }
                 }
                 if (pastTouchSlop) {
                     if (zoomChange != 1f || panChange != Offset.Zero) onGesture(panChange, zoomChange)
@@ -284,6 +291,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
+    // AutoCAD-style Zoom Window/All/Previous, offered as sub-actions of the Pan/Zoom tool.
+    val viewHistory = remember { mutableStateListOf<Pair<Float, Offset>>() }
+    var zoomWindowArmed by remember { mutableStateOf(false) }
+    var zoomWinStart by remember { mutableStateOf<Offset?>(null) }
+    var zoomWinCurrent by remember { mutableStateOf<Offset?>(null) }
 
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
@@ -397,6 +409,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun resetToolState() {
         lineStartPoint = null
         pendingRect = null; pendingCircle = null
+        zoomWindowArmed = false; zoomWinStart = null; zoomWinCurrent = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
         extendBoundaryIndex = -1; extendMessage = null
@@ -621,8 +634,36 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         viewOffset = clampViewOffset(Offset(cw / 2f - p.x * viewScale, ch / 2f - p.y * viewScale), viewScale)
     }
 
+    /** Records the current view before it's about to change, for [zoomPrevious] — same idea as
+     *  AutoCAD's ZOOM Previous, capped so the history can't grow without bound over a long session. */
+    fun pushViewHistory() {
+        viewHistory.add(viewScale to viewOffset)
+        if (viewHistory.size > 20) viewHistory.removeAt(0)
+    }
+
+    /** AutoCAD-style ZOOM Previous: steps back to the view exactly as it was before the last
+     *  zoom/pan gesture, Zoom Window, or Zoom All — a no-op with nothing to go back to. */
+    fun zoomPrevious() {
+        val prev = viewHistory.removeLastOrNull() ?: return
+        viewScale = prev.first; viewOffset = prev.second
+    }
+
+    /** AutoCAD-style Zoom Window: fits a rectangle given as two corner points (in the same
+     *  canvas-pixel space every shape's x/y is stored in) into view — used by the Pan/Zoom tool's
+     *  "Window" action once the user drags out the area they want. */
+    fun setViewportToRect(x1: Float, y1: Float, x2: Float, y2: Float) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        val spanX = abs(x2 - x1).coerceAtLeast(1f)
+        val spanY = abs(y2 - y1).coerceAtLeast(1f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
+        val midX = (x1 + x2) / 2f; val midY = (y1 + y2) / 2f
+        viewScale = scale
+        viewOffset = Offset(cw / 2f - midX * scale, ch / 2f - midY * scale)
+    }
+
     /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
-     *  fits back on screen at once. */
+     *  fits back on screen at once ("Zoom All"). */
     fun fitToScreen() {
         if (shapes.isEmpty()) return
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
@@ -638,6 +679,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val spanY = (maxY - minY).coerceAtLeast(1f)
         val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
         val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
+        pushViewHistory()
         viewScale = scale
         viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
     }
@@ -1694,6 +1736,25 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 )
             }
+            if (tool == Tool.PAN) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = zoomWindowArmed,
+                        onClick = { zoomWindowArmed = !zoomWindowArmed },
+                        label = { Text("Window") }
+                    )
+                    FilterChip(selected = false, onClick = { fitToScreen() }, label = { Text("All") })
+                    FilterChip(
+                        selected = false, onClick = { zoomPrevious() },
+                        enabled = viewHistory.isNotEmpty(),
+                        label = { Text("Previous") }
+                    )
+                }
+            }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
@@ -1797,6 +1858,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.DISTANCE -> "Tap the second point"
                     tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
+                    tool == Tool.PAN && zoomWindowArmed -> "Drag a window around the area to zoom into"
+                    tool == Tool.PAN -> "Drag to pan — or use Window/All/Previous below"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
@@ -1839,10 +1902,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             )
                         }
                     }
-                    .pointerInput(tool) {
+                    .pointerInput(tool, zoomWindowArmed) {
                         // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
-                        // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
-                        detectPanOrZoom(requireTwoFingers = tool != Tool.PAN) { pan, zoom ->
+                        // dedicated Pan/Zoom tool additionally allows a single finger to drag it —
+                        // unless Zoom Window is armed, in which case a single finger instead drags
+                        // out the window rectangle (handled by the Canvas below), so this must not
+                        // also treat it as a pan.
+                        detectPanOrZoom(
+                            requireTwoFingers = tool != Tool.PAN || zoomWindowArmed,
+                            onGestureStart = { pushViewHistory() }
+                        ) { pan, zoom ->
                             viewScale = (viewScale * zoom).coerceIn(0.02f, 6f)
                             viewOffset = clampViewOffset(viewOffset + pan, viewScale)
                         }
@@ -1887,7 +1956,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         )
                     }
                     Canvas(
-                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
+                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed, zoomWindowArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
@@ -2064,7 +2133,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                     }
                                 })
-                                Tool.PAN -> {}
+                                Tool.PAN -> if (zoomWindowArmed) {
+                                    detectDragGestures(
+                                        onDragStart = { p -> zoomWinStart = p; zoomWinCurrent = p },
+                                        onDrag = { p -> zoomWinCurrent = p },
+                                        onDragEnd = {
+                                            val s = zoomWinStart; val c = zoomWinCurrent
+                                            if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
+                                                pushViewHistory()
+                                                setViewportToRect(s.x, s.y, c.x, c.y)
+                                            }
+                                            zoomWinStart = null; zoomWinCurrent = null
+                                            zoomWindowArmed = false
+                                        }
+                                    )
+                                } else {}
                                 Tool.FREEHAND -> detectDragGestures(
                                     onDragStart = { p -> freehandPoints.clear(); freehandPoints.add(p) },
                                     onDrag = { p -> freehandPoints.add(p) },
@@ -2470,6 +2553,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     else -> Offset(s.x2, s.y2)
                                 }
                                 drawCircle(Color(0xFFE65100), radius = maxOf(7f, minPx(4f)), center = p)
+                            }
+                        }
+                        if (zoomWindowArmed) {
+                            val s2 = zoomWinStart; val c2 = zoomWinCurrent
+                            if (s2 != null && c2 != null) {
+                                val topLeft = Offset(minOf(s2.x, c2.x), minOf(s2.y, c2.y))
+                                val boxSize = androidx.compose.ui.geometry.Size(abs(c2.x - s2.x), abs(c2.y - s2.y))
+                                val zoomColor = Color(0xFF1565C0)
+                                drawRect(zoomColor.copy(alpha = 0.1f), topLeft = topLeft, size = boxSize)
+                                drawRect(
+                                    zoomColor, topLeft = topLeft, size = boxSize,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                )
                             }
                         }
                     }
