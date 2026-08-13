@@ -3600,6 +3600,21 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 }
             )
         }
+        ShapeKind.IMAGE -> {
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Inserted image") },
+                text = {
+                    Text(
+                        "Use Select's box tool to Move or Copy it. Delete removes just this " +
+                            "image, not the rest of the drawing.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                    )
+                },
+                confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+                dismissButton = { TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) } }
+            )
+        }
         else -> {
             LabelInputDialog(
                 title = when (shape.kind) {
