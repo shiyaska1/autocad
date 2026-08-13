@@ -453,13 +453,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         lastWallInnerEnd = null; lastWallOuterIndex = -1
     }
 
+    /** Converts a desired on-screen touch tolerance (px) into the equivalent distance in this
+     *  canvas's own local/content space at the CURRENT zoom — the same idea as the drawing loop's
+     *  minPx(), just usable outside it. Every hit-test/snap radius below used to be a fixed content-
+     *  space constant, so the actual on-screen tap target it represented shrank right along with
+     *  the content whenever zoomed out — a 26px-equivalent radius became a couple of real screen
+     *  pixels at, say, 10% zoom, making anything hard to select/snap/grab precisely right when
+     *  zooming out to reach it in the first place should have made it easier. */
+    fun screenPxToContent(px: Float): Float = px / viewScale.coerceAtLeast(0.001f)
+
     /** Nearest existing line endpoint/midpoint within range, excluding shapes at [excludeIndices]
      *  (e.g. the ones currently being moved/copied, so a selection doesn't snap to itself) — null
      *  when nothing is close enough. Used both to snap a single tapped point and to highlight the
      *  point a live Move/Copy drag would land on. */
     fun findSnapPoint(p: Offset, excludeIndices: Collection<Int> = emptyList()): Offset? {
         if (!snapOn) return null
-        var best: Offset? = null; var bestDist = 28f
+        var best: Offset? = null; var bestDist = screenPxToContent(28f)
         shapes.forEachIndexed { i, s ->
             if (i in excludeIndices) return@forEachIndexed
             if (s.kind == ShapeKind.LINE) {
@@ -493,7 +502,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
 
     fun hitTestLine(p: Offset): Int {
-        var best = -1; var bestDist = 26f
+        var best = -1; var bestDist = screenPxToContent(26f)
         shapes.forEachIndexed { i, s ->
             if (s.kind == ShapeKind.LINE) {
                 val d = distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
@@ -545,7 +554,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
 
     fun hitTest(p: Offset): Int {
-        var best = -1; var bestDist = 26f
+        var best = -1; var bestDist = screenPxToContent(26f)
         shapes.forEachIndexed { i, s ->
             val d = when (s.kind) {
                 ShapeKind.LINE -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
@@ -583,7 +592,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
      *  body to open its edit dialog. Returns the shape index and which end (1 = x1/y1, 2 = x2/y2),
      *  or null if nothing is close enough. */
     fun hitTestGrip(p: Offset): Pair<Int, Int>? {
-        var best: Pair<Int, Int>? = null; var bestDist = 24f
+        var best: Pair<Int, Int>? = null; var bestDist = screenPxToContent(24f)
         shapes.forEachIndexed { i, s ->
             if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
                 val d1 = hypotF(p.x - s.x1, p.y - s.y1)
