@@ -1475,9 +1475,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 // Keeps this line's geometry exactly as drawn, but treats its current on-screen
                 // length as the typed real-world value — a calibration reference, same idea as the
                 // Distance tool, without stretching (and possibly sending) the endpoint off-screen.
+                // Also becomes the authoritative scale (like the Distance tool does) instead of just
+                // joining the pool currentPxPerMm() averages over every confirmed line — otherwise
+                // each additional confirmed line's own hand-drawn imprecision nudges that average,
+                // so a scale that was just explicitly set could silently drift again right after,
+                // making later dimension readings on this same line not quite match what was typed.
                 val mm = displayToMm(value, unit)
                 val cur = shapes[pendingLengthIndex]
+                val lenPx = hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
                 shapes[pendingLengthIndex] = cur.copy(realLength = mm, confirmed = true)
+                if (mm > 0.0) { calibrationRatio = lenPx / mm.toFloat(); useCalibrationRatio = true }
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
@@ -1609,6 +1616,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 unitLabel = unit,
                 onConfirm = { value ->
                     val mm = displayToMm(value, unit)
+                    // Same fix as the Line dialog's "Set Scale": lock this in as the authoritative
+                    // ratio instead of letting it just join currentPxPerMm()'s running average over
+                    // every confirmed line, which would let later confirmed lines quietly drift it.
+                    if (mm > 0.0) { calibrationRatio = lenPx / mm.toFloat(); useCalibrationRatio = true }
                     shapes[idx] = shapes[idx].copy(confirmed = true, realLength = mm)
                     pendingRoomCalibrate = null
                     pendingRoomIndices?.let { ensureShapesVisible(it) }
