@@ -63,6 +63,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -86,8 +87,11 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -174,6 +178,15 @@ private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
 @Composable
 fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     val context = LocalContext.current
+    val androidView = LocalView.current
+    // The canvas reaches close to the screen edges, so Android's own edge-swipe-back gesture can
+    // otherwise steal a drag that starts/ends near the left or right border — see the canvas Box's
+    // onGloballyPositioned below, which keeps this in sync with its actual on-screen bounds.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= 29) androidView.systemGestureExclusionRects = emptyList()
+        }
+    }
     val scope = rememberCoroutineScope()
     val dao = remember { AppDatabase.get(context).sketchDao() }
     var savedBlocks by remember { mutableStateOf<List<SketchBlock>>(emptyList()) }
@@ -1727,6 +1740,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     .background(Color.White)
                     .border(1.dp, Color(0xFF9E9E9E))
                     .onSizeChanged { canvasSize = it }
+                    // Exclude the canvas's own on-screen area from Android's edge-swipe-back
+                    // gesture, so dragging a line/rectangle to a corner near the left or right
+                    // border isn't intercepted by the system before this app ever sees it.
+                    .onGloballyPositioned { coords ->
+                        if (android.os.Build.VERSION.SDK_INT >= 29) {
+                            val b = coords.boundsInWindow()
+                            androidView.systemGestureExclusionRects = listOf(
+                                android.graphics.Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt())
+                            )
+                        }
+                    }
                     .pointerInput(tool) {
                         // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
                         // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
