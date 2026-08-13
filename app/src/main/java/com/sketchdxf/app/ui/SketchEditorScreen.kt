@@ -14,8 +14,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures as foundationDetectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures as foundationDetectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1785,14 +1785,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     fun toContentSpace(raw: Offset): Offset =
                         Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
                     suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
-                        androidx.compose.foundation.gestures.detectTapGestures(onTap = { raw -> onTap(toContentSpace(raw)) })
+                        foundationDetectTapGestures(onTap = { raw -> onTap(toContentSpace(raw)) })
                     }
                     suspend fun PointerInputScope.detectDragGestures(
                         onDragStart: (Offset) -> Unit = {},
                         onDrag: (Offset) -> Unit,
                         onDragEnd: () -> Unit = {}
                     ) {
-                        androidx.compose.foundation.gestures.detectDragGestures(
+                        foundationDetectDragGestures(
                             onDragStart = { raw -> onDragStart(toContentSpace(raw)) },
                             onDrag = { change, _ -> onDrag(toContentSpace(change.position)) },
                             onDragEnd = { onDragEnd() }
