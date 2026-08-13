@@ -468,7 +468,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
      *  point a live Move/Copy drag would land on. */
     fun findSnapPoint(p: Offset, excludeIndices: Collection<Int> = emptyList()): Offset? {
         if (!snapOn) return null
-        var best: Offset? = null; var bestDist = screenPxToContent(28f)
+        // Deliberately tighter than the 26-28px hit-test radii below — snapping is a much more
+        // surprising thing to happen without asking (it silently redirects where a new point
+        // lands), so it should only kick in when a tap is genuinely close to an existing point,
+        // not just "somewhere in the neighborhood" of one.
+        var best: Offset? = null; var bestDist = screenPxToContent(16f)
         shapes.forEachIndexed { i, s ->
             if (i in excludeIndices) return@forEachIndexed
             if (s.kind == ShapeKind.LINE) {
