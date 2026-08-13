@@ -2181,7 +2181,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             hypotF(maxX - minX, maxY - minY)
                         }
                         val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
-                        val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
+                        // Bumped up from the original 20..42 range — dimension text (the measured
+                        // distance shown along a Dimension) needs to stay easily readable at a
+                        // glance while working, especially outdoors on-site.
+                        val dimTextSize = (drawingExtent * 0.04f).coerceIn(30f, 60f)
                         // Every width/radius/text-size literal below is in this canvas's own local
                         // (content) space, which then gets uniformly scaled by viewScale for display
                         // (see the graphicsLayer this Canvas sits inside). At a normal zoom that's fine,
@@ -2274,7 +2277,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
                                         val effTextSize = maxOf(
                                             if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else dimTextSize,
-                                            minPx(10f)
+                                            minPx(14f)
                                         )
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
