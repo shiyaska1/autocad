@@ -1771,12 +1771,39 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
+                    // The canvas below draws in its own fixed local coordinate space (the same
+                    // space shapes are stored in); the Box above it uniformly scales/pans that
+                    // whole space for display via graphicsLayer. Touches delivered to a
+                    // pointerInput nested inside that transform come through as raw, untransformed
+                    // screen coordinates rather than being converted back into local space — so
+                    // without correcting for it, every tool can only ever reach whatever was
+                    // visible at viewScale=1 / viewOffset=(0,0), no matter how far you zoom or pan
+                    // afterward. These two are drop-in replacements for detectTapGestures/
+                    // detectDragGestures — same call signatures as the real ones below, so none of
+                    // the tool-specific gesture logic needed to change, only the coordinates it's
+                    // handed.
+                    fun toContentSpace(raw: Offset): Offset =
+                        Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                    suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
+                        androidx.compose.foundation.gestures.detectTapGestures(onTap = { raw -> onTap(toContentSpace(raw)) })
+                    }
+                    suspend fun PointerInputScope.detectDragGestures(
+                        onDragStart: (Offset) -> Unit = {},
+                        onDrag: (Offset) -> Unit,
+                        onDragEnd: () -> Unit = {}
+                    ) {
+                        androidx.compose.foundation.gestures.detectDragGestures(
+                            onDragStart = { raw -> onDragStart(toContentSpace(raw)) },
+                            onDrag = { change, _ -> onDrag(toContentSpace(change.position)) },
+                            onDragEnd = { onDragEnd() }
+                        )
+                    }
                     Canvas(
                         Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c = dragCurrent
                                         if (s != null && c != null) {
@@ -1791,7 +1818,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 )
                                 Tool.RECTANGLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = trySnapPoint(p); dragCurrent = dragStart },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c0 = dragCurrent
                                         if (s != null && c0 != null) {
@@ -1902,10 +1929,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             selectTapStart = p
                                         }
                                     },
-                                    onDrag = { change, _ ->
+                                    onDrag = { p ->
                                         val idx = gripDragIndex
                                         if (idx >= 0) {
-                                            val np = trySnapPoint(change.position)
+                                            val np = trySnapPoint(p)
                                             val s = shapes[idx]
                                             // Reshaping an endpoint by hand invalidates any previously
                                             // confirmed/typed real-world length, same as Trim/Extend/Break.
@@ -1963,7 +1990,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.PAN -> {}
                                 Tool.FREEHAND -> detectDragGestures(
                                     onDragStart = { p -> freehandPoints.clear(); freehandPoints.add(p) },
-                                    onDrag = { change, _ -> freehandPoints.add(change.position) },
+                                    onDrag = { p -> freehandPoints.add(p) },
                                     onDragEnd = {
                                         if (freehandPoints.size >= 2) {
                                             pushUndo()
@@ -1985,9 +2012,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // point (if Snap is on) is highlighted and used as the actual drop point.
                                     detectDragGestures(
                                         onDragStart = { p -> moveDragStart = p; moveDragCurrent = p; moveSnapTarget = null },
-                                        onDrag = { change, _ ->
-                                            moveDragCurrent = change.position
-                                            moveSnapTarget = findSnapPoint(change.position, selectedIndices)
+                                        onDrag = { p ->
+                                            moveDragCurrent = p
+                                            moveSnapTarget = findSnapPoint(p, selectedIndices)
                                         },
                                         onDragEnd = {
                                             val s = moveDragStart; val c = moveSnapTarget ?: moveDragCurrent
@@ -2011,7 +2038,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 } else {
                                     detectDragGestures(
                                         onDragStart = { p -> selectDragStart = p; selectDragCurrent = p },
-                                        onDrag = { change, _ -> selectDragCurrent = change.position },
+                                        onDrag = { p -> selectDragCurrent = p },
                                         onDragEnd = {
                                             val s = selectDragStart; val c = selectDragCurrent
                                             if (s != null && c != null) {
@@ -2074,7 +2101,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.STRETCH -> if (!stretchArmed) {
                                     detectDragGestures(
                                         onDragStart = { p -> stretchDragStart = p; stretchDragCurrent = p },
-                                        onDrag = { change, _ -> stretchDragCurrent = change.position },
+                                        onDrag = { p -> stretchDragCurrent = p },
                                         onDragEnd = {
                                             val s = stretchDragStart; val c = stretchDragCurrent
                                             if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
