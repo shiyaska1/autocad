@@ -177,7 +177,7 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
 private suspend fun rebuildBackgroundPath(context: android.content.Context, sources: List<SketchSource>): String? {
     sources.firstOrNull { it.mime.startsWith("image/") }?.let { return it.path }
     val pdfSource = sources.firstOrNull { it.mime.contains("pdf") || it.name.endsWith(".pdf", ignoreCase = true) } ?: return null
-    val bitmap = PdfPageRenderer.renderPages(context, android.net.Uri.fromFile(File(pdfSource.path)), targetWidth = 1600).firstOrNull() ?: return null
+    val bitmap = PdfPageRenderer.renderPages(context, android.net.Uri.fromFile(File(pdfSource.path))).firstOrNull() ?: return null
     val baseFile = SketchAttachmentStore.newFile(context, "base", "png")
     FileOutputStream(baseFile).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
     return baseFile.absolutePath
