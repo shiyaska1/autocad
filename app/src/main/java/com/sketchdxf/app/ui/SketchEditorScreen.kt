@@ -251,10 +251,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var editingIndex by remember { mutableStateOf(-1) }
     var pendingTextPos by remember { mutableStateOf<Offset?>(null) }
     var showRoomPlan by remember { mutableStateOf(false) }
-    // AutoCAD-style "Zoom Window": types two corner points directly instead of relying on
-    // pinch/pan gestures to reach them — a manual escape hatch for jumping straight to a
-    // specific area of a large drawing.
-    var showViewportDialog by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
     var dxfImportMessage by remember { mutableStateOf<String?>(null) }
@@ -639,23 +635,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
         viewScale = scale
         viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
-    }
-
-    /** AutoCAD-style "Zoom Window": fits a rectangle given as two corner points (in the same
-     *  canvas-pixel space every shape's x/y is stored in) into view, instead of the whole
-     *  drawing's own bounds like [fitToScreen] does — a manual way to jump straight to a specific
-     *  area when reaching it by pinch/pan isn't working. Deliberately NOT run through
-     *  [clampViewOffset] — the point of this command is to reach an area regardless of whatever
-     *  that clamp currently considers reachable. */
-    fun setViewportToRect(x1: Float, y1: Float, x2: Float, y2: Float) {
-        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
-        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
-        val spanX = abs(x2 - x1).coerceAtLeast(1f)
-        val spanY = abs(y2 - y1).coerceAtLeast(1f)
-        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
-        val midX = (x1 + x2) / 2f; val midY = (y1 + y2) / 2f
-        viewScale = scale
-        viewOffset = Offset(cw / 2f - midX * scale, ch / 2f - midY * scale)
     }
 
     /** Shifts a shape by (dx, dy) in canvas-pixel space — used by group Move and by Copy's paste offset. */
@@ -1277,15 +1256,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { showRoomPlan = false }
         )
     }
-    if (showViewportDialog) {
-        ViewportDialog(
-            onConfirm = { x1, y1, x2, y2 ->
-                setViewportToRect(x1, y1, x2, y2)
-                showViewportDialog = false
-            },
-            onDismiss = { showViewportDialog = false }
-        )
-    }
     if (pendingLengthIndex in shapes.indices) {
         val drawn = shapes[pendingLengthIndex]
         val asDrawnMm = hypotF(drawn.x2 - drawn.x1, drawn.y2 - drawn.y1) / currentPxPerMm()
@@ -1599,7 +1569,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (tool == Tool.LINE) resetToolState() // tap again = cancel/reset
                     tool = Tool.LINE
                 }, label = { Icon(Icons.Filled.ShowChart, "Line") })
-                FilterChip(selected = false, onClick = { showViewportDialog = true }, label = { Text("Goto") })
                 FilterChip(selected = tool == Tool.RECTANGLE, onClick = {
                     tool = Tool.RECTANGLE; resetToolState()
                 }, label = { Text("Rect") })
@@ -2803,69 +2772,6 @@ private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -
             }) { Text("Apply") }
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
-    )
-}
-
-/** Asked from the toolbar's "Goto" action: two corner points, in the same canvas-pixel space
- *  every shape's x/y already uses, define a rectangle to bring into view — an AutoCAD
- *  "Zoom Window"-style manual escape hatch for reaching a specific area directly, for when
- *  pinch/pan gestures alone aren't getting you there. */
-@Composable
-private fun ViewportDialog(onConfirm: (x1: Float, y1: Float, x2: Float, y2: Float) -> Unit, onDismiss: () -> Unit) {
-    var x1 by remember { mutableStateOf("") }
-    var y1 by remember { mutableStateOf("") }
-    var x2 by remember { mutableStateOf("") }
-    var y2 by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Go to area") },
-        text = {
-            Column {
-                Text(
-                    "Type two corner points to jump straight to that area — the same coordinates every shape uses internally.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
-                )
-                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = x1, onValueChange = { x1 = it; error = null }, singleLine = true,
-                        label = { Text("Left X") },
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = y1, onValueChange = { y1 = it; error = null }, singleLine = true,
-                        label = { Text("Left Y") },
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = x2, onValueChange = { x2 = it; error = null }, singleLine = true,
-                        label = { Text("Right X") },
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = y2, onValueChange = { y2 = it; error = null }, singleLine = true,
-                        label = { Text("Right Y") },
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                val vx1 = x1.toFloatOrNull(); val vy1 = y1.toFloatOrNull()
-                val vx2 = x2.toFloatOrNull(); val vy2 = y2.toFloatOrNull()
-                if (vx1 == null || vy1 == null || vx2 == null || vy2 == null) error = "Enter all four coordinates"
-                else onConfirm(vx1, vy1, vx2, vy2)
-            }) { Text("Go") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
 
