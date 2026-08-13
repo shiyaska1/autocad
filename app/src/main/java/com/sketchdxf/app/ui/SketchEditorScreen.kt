@@ -1559,7 +1559,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     shapes.add(SketchShape(workId = 0, kind = ShapeKind.IMAGE, x1 = p.x, y1 = p.y, x2 = p.x + wPx, y2 = p.y + hPx, path = path))
                     pendingImage = null
                     pendingImagePlacement = null
-                    tool = Tool.SELECT
+                    // Deliberately NOT switching tool here — it used to jump to Select, which
+                    // silently ate the next tap or two (opening the image's own edit dialog
+                    // instead of starting whatever the user actually meant to draw next). Staying
+                    // on Image is a safe no-op until a different tool is explicitly picked.
                 },
                 onCancel = {
                     pendingImagePlacement = null
@@ -2224,9 +2227,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         shapes.addAll(local.map { translateShape(scaleShape(it, factor), p.x, p.y) })
                                         // One insert per pick, not one per tap — arm the picker again
                                         // (tap "Block") for another copy instead of it repeating on
-                                        // every further tap.
+                                        // every further tap. Deliberately NOT switching to Select
+                                        // here — that used to silently eat the next tap or two
+                                        // (opening the block's own edit dialog instead of whatever
+                                        // the user actually meant to draw next); staying on Block is
+                                        // a safe no-op now that pendingBlockInsert is cleared.
                                         pendingBlockInsert = null
-                                        tool = Tool.SELECT
                                     }
                                 })
                                 Tool.IMAGE -> detectTapGestures(onTap = { p ->
