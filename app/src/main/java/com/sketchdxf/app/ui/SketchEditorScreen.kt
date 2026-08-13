@@ -250,6 +250,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var dragCurrent by remember { mutableStateOf<Offset?>(null) }
     var editingIndex by remember { mutableStateOf(-1) }
     var pendingTextPos by remember { mutableStateOf<Offset?>(null) }
+    // Rectangle/Circle work the same way Line does: the drag places it roughly, then a dialog
+    // offers to type exact real-world dimensions instead of trusting the tapped/dragged size.
+    var pendingRect by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
+    var pendingCircle by remember { mutableStateOf<Pair<Offset, Float>?>(null) }
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
@@ -392,6 +396,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     fun resetToolState() {
         lineStartPoint = null
+        pendingRect = null; pendingCircle = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
         extendBoundaryIndex = -1; extendMessage = null
@@ -1368,6 +1373,59 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { pendingDimension = null }
         )
     }
+    pendingRect?.let { (s, c) ->
+        val lengthMm = abs(c.x - s.x) / currentPxPerMm()
+        val heightMm = abs(c.y - s.y) / currentPxPerMm()
+        fun addRect(corner1: Offset, corner2: Offset, lengthMm: Double?, heightMm: Double?) {
+            pushUndo()
+            val p2 = Offset(corner2.x, corner1.y); val p4 = Offset(corner1.x, corner2.y)
+            val rectColor = currentColor?.toArgb()
+            val lenConfirmed = lengthMm != null; val hgtConfirmed = heightMm != null
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = corner1.x, y1 = corner1.y, x2 = p2.x, y2 = p2.y, color = rectColor, confirmed = lenConfirmed, realLength = lengthMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = corner2.x, y2 = corner2.y, color = rectColor, confirmed = hgtConfirmed, realLength = heightMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = corner2.x, y1 = corner2.y, x2 = p4.x, y2 = p4.y, color = rectColor, confirmed = lenConfirmed, realLength = lengthMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = corner1.x, y2 = corner1.y, color = rectColor, confirmed = hgtConfirmed, realLength = heightMm ?: 0.0))
+        }
+        RectangleFinishDialog(
+            asLengthDisplay = mmToDisplay(lengthMm.toDouble(), unit).toFloat(),
+            asHeightDisplay = mmToDisplay(heightMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            onApply = { lengthVal, heightVal ->
+                val lenMm = lengthVal?.let { displayToMm(it, unit) }
+                val hgtMm = heightVal?.let { displayToMm(it, unit) }
+                val signX = if (c.x >= s.x) 1f else -1f; val signY = if (c.y >= s.y) 1f else -1f
+                val wPx = lenMm?.let { (it.toFloat() * currentPxPerMm()) } ?: abs(c.x - s.x)
+                val hPx = hgtMm?.let { (it.toFloat() * currentPxPerMm()) } ?: abs(c.y - s.y)
+                val corner2 = Offset(s.x + signX * wPx, s.y + signY * hPx)
+                addRect(s, corner2, lenMm, hgtMm)
+                pendingRect = null
+            },
+            onUseAsIs = {
+                addRect(s, c, null, null)
+                pendingRect = null
+            },
+            onCancel = { pendingRect = null }
+        )
+    }
+    pendingCircle?.let { (center, radiusPx) ->
+        val asTappedMm = radiusPx / currentPxPerMm()
+        CircleFinishDialog(
+            asTappedDisplay = mmToDisplay(asTappedMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            onApply = { value ->
+                pushUndo()
+                val rPx = displayToMm(value, unit).toFloat() * currentPxPerMm()
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = center.x, cy = center.y, r = rPx, color = currentColor?.toArgb()))
+                pendingCircle = null
+            },
+            onUseAsIs = {
+                pushUndo()
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = center.x, cy = center.y, r = radiusPx, color = currentColor?.toArgb()))
+                pendingCircle = null
+            },
+            onCancel = { pendingCircle = null }
+        )
+    }
     pendingDistancePx?.let { px ->
         DistanceCalibrationDialog(
             measuredPx = px,
@@ -1838,10 +1896,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val s = dragStart; val c = dragCurrent
                                         if (s != null && c != null) {
                                             val len = hypotF(c.x - s.x, c.y - s.y)
-                                            if (len > 12f) {
-                                                pushUndo()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len, color = currentColor?.toArgb()))
-                                            }
+                                            if (len > 12f) pendingCircle = s to len
                                         }
                                         dragStart = null; dragCurrent = null
                                     }
@@ -1853,15 +1908,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         val s = dragStart; val c0 = dragCurrent
                                         if (s != null && c0 != null) {
                                             val c = trySnapPoint(c0)
-                                            if (hypotF(c.x - s.x, c.y - s.y) > 8f) {
-                                                pushUndo()
-                                                val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
-                                                val rectColor = currentColor?.toArgb()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y, color = rectColor))
-                                            }
+                                            if (hypotF(c.x - s.x, c.y - s.y) > 8f) pendingRect = s to c
                                         }
                                         dragStart = null; dragCurrent = null
                                     }
@@ -2741,6 +2788,114 @@ private fun LineFinishDialog(
                 }) { Text("Set Scale") }
             }
         }
+    )
+}
+
+/** Both points are already dragged out; this asks for the rectangle's exact length/height (each
+ *  independently optional), pre-filled with what was actually dragged. Nothing is placed until
+ *  Apply/Use as tapped — Cancel just discards the drag. */
+@Composable
+private fun RectangleFinishDialog(
+    asLengthDisplay: Float,
+    asHeightDisplay: Float,
+    unitLabel: String,
+    onApply: (length: Double?, height: Double?) -> Unit,
+    onUseAsIs: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var lengthText by remember { mutableStateOf("") }
+    var heightText by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onUseAsIs,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Rectangle size", modifier = Modifier.weight(1f))
+                IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel — remove") }
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "As dragged: ~${trimNum(asLengthDisplay.toDouble())} × ${trimNum(asHeightDisplay.toDouble())}$unitLabel. " +
+                        "Type exact values to override either side, or use it as dragged.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = lengthText, onValueChange = { lengthText = it; error = null }, singleLine = true,
+                    label = { Text("Exact length ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                OutlinedTextField(
+                    value = heightText, onValueChange = { heightText = it; error = null }, singleLine = true,
+                    label = { Text("Exact height ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val length = if (lengthText.isBlank()) null else lengthText.toDoubleOrNull()
+                val height = if (heightText.isBlank()) null else heightText.toDoubleOrNull()
+                when {
+                    lengthText.isNotBlank() && length == null -> error = "Enter a valid length"
+                    heightText.isNotBlank() && height == null -> error = "Enter a valid height"
+                    length == null && height == null -> onUseAsIs()
+                    else -> onApply(length, height)
+                }
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as dragged") } }
+    )
+}
+
+/** The centre and edge are already dragged out; this asks for the circle's exact radius, pre-filled
+ *  with what was actually dragged. Nothing is placed until Apply/Use as tapped — Cancel just
+ *  discards the drag. */
+@Composable
+private fun CircleFinishDialog(
+    asTappedDisplay: Float,
+    unitLabel: String,
+    onApply: (value: Double) -> Unit,
+    onUseAsIs: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onUseAsIs,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Circle radius", modifier = Modifier.weight(1f))
+                IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel — remove") }
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "As dragged: ~${trimNum(asTappedDisplay.toDouble())}$unitLabel radius. Type an exact value to override, or use it as dragged.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Exact radius ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (text.isBlank()) { onUseAsIs(); return@TextButton }
+                val value = text.toDoubleOrNull()
+                if (value == null) error = "Enter a valid radius" else onApply(value)
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as dragged") } }
     )
 }
 
