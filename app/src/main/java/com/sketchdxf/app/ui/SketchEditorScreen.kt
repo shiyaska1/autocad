@@ -1323,7 +1323,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     pendingDimension?.let { (p1, p2) ->
         val measuredMm = hypotF(p2.x - p1.x, p2.y - p1.y) / currentPxPerMm()
         DimensionTextDialog(
-            initialText = "${trimNum(mmToDisplay(measuredMm.toDouble(), unit))}$unit",
+            initialText = trimNum(mmToDisplay(measuredMm.toDouble(), unit)),
             unitLabel = unit,
             onConfirm = { text, fontSizeMm, offsetPx ->
                 pushUndo()
