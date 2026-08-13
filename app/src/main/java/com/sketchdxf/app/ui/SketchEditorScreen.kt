@@ -261,6 +261,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // offers to type exact real-world dimensions instead of trusting the tapped/dragged size.
     var pendingRect by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     var pendingCircle by remember { mutableStateOf<Pair<Offset, Float>?>(null) }
+    // Freehand "Room" mode: a hand-drawn stroke is auto-straightened into wall segments, then the
+    // most level (or longest) segment is offered as a scale reference before the view refits.
+    var freehandRoomMode by remember { mutableStateOf(false) }
+    var pendingRoomCalibrate by remember { mutableStateOf<Int?>(null) }
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
@@ -408,7 +412,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     fun resetToolState() {
         lineStartPoint = null
-        pendingRect = null; pendingCircle = null
+        pendingRect = null; pendingCircle = null; pendingRoomCalibrate = null
         zoomWindowArmed = false; zoomWinStart = null; zoomWinCurrent = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
@@ -773,6 +777,35 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 val simplified = douglasPeucker(pts, tolerancePx)
                 shapes[idx] = s.copy(path = SketchPath.serialize(simplified.map { it.x to it.y }))
             }
+        }
+    }
+
+    /** Freehand "Room" mode: straightens a hand-drawn stroke (Douglas-Peucker, same as Smooth)
+     *  straight into individual LINE wall segments — no separate FREEHAND/Explode step needed —
+     *  then arms [pendingRoomCalibrate] on whichever segment reads most like "the top wall": the
+     *  most level (within ~20° of horizontal) and topmost of those, or just the longest segment if
+     *  nothing drawn is roughly level. */
+    fun finishFreehandRoom(points: List<Offset>) {
+        if (points.size < 2) return
+        val simplified = douglasPeucker(points, 14f)
+        if (simplified.size < 2) return
+        pushUndo()
+        val firstIndex = shapes.size
+        simplified.zipWithNext { a, b ->
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y, color = currentColor?.toArgb()))
+        }
+        val newIndices = firstIndex until shapes.size
+        val levelThreshold = kotlin.math.sin(Math.toRadians(20.0)).toFloat()
+        val levelCandidates = newIndices.filter { idx ->
+            val s = shapes[idx]
+            val dx = s.x2 - s.x1; val dy = s.y2 - s.y1
+            val len = hypotF(dx, dy)
+            len > 1e-3f && abs(dy) / len < levelThreshold
+        }
+        pendingRoomCalibrate = if (levelCandidates.isNotEmpty()) {
+            levelCandidates.minByOrNull { (shapes[it].y1 + shapes[it].y2) / 2f }
+        } else {
+            newIndices.maxByOrNull { hypotF(shapes[it].x2 - shapes[it].x1, shapes[it].y2 - shapes[it].y1) }
         }
     }
 
@@ -1468,6 +1501,29 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { pendingCircle = null }
         )
     }
+    pendingRoomCalibrate?.let { idx ->
+        if (idx in shapes.indices) {
+            val line = shapes[idx]
+            val lenPx = hypotF(line.x2 - line.x1, line.y2 - line.y1)
+            val asTappedMm = lenPx / currentPxPerMm()
+            RoomCalibrateDialog(
+                asTappedDisplay = mmToDisplay(asTappedMm.toDouble(), unit).toFloat(),
+                unitLabel = unit,
+                onConfirm = { value ->
+                    val mm = displayToMm(value, unit)
+                    shapes[idx] = shapes[idx].copy(confirmed = true, realLength = mm)
+                    pendingRoomCalibrate = null
+                    fitToScreen()
+                },
+                onSkip = {
+                    pendingRoomCalibrate = null
+                    fitToScreen()
+                }
+            )
+        } else {
+            pendingRoomCalibrate = null
+        }
+    }
     pendingDistancePx?.let { px ->
         DistanceCalibrationDialog(
             measuredPx = px,
@@ -1824,6 +1880,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 }
             }
+            if (tool == Tool.FREEHAND) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = freehandRoomMode, onClick = { freehandRoomMode = !freehandRoomMode },
+                        label = { Text("Room") }
+                    )
+                }
+            }
             calibrationRatio?.let { r ->
                 val pxPerDisplayUnit = r * displayToMm(1.0, unit)
                 Text(
@@ -1860,6 +1924,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
                     tool == Tool.PAN && zoomWindowArmed -> "Drag a window around the area to zoom into"
                     tool == Tool.PAN -> "Drag to pan — or use Window/All/Previous below"
+                    tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
@@ -2153,14 +2218,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     onDrag = { p -> freehandPoints.add(p) },
                                     onDragEnd = {
                                         if (freehandPoints.size >= 2) {
-                                            pushUndo()
-                                            shapes.add(
-                                                SketchShape(
-                                                    workId = 0, kind = ShapeKind.FREEHAND,
-                                                    path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
-                                                    color = currentColor?.toArgb()
+                                            if (freehandRoomMode) {
+                                                finishFreehandRoom(freehandPoints.toList())
+                                            } else {
+                                                pushUndo()
+                                                shapes.add(
+                                                    SketchShape(
+                                                        workId = 0, kind = ShapeKind.FREEHAND,
+                                                        path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
+                                                        color = currentColor?.toArgb()
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
                                         freehandPoints.clear()
                                     }
@@ -3167,6 +3236,49 @@ private fun BlockPickerDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
+/** Shown once a hand-drawn Room-mode stroke has been straightened into wall segments: asks for the
+ *  real length of whichever segment looked most like "the top wall" (see [SketchEditorScreen]'s
+ *  finishFreehandRoom), then applies it as a Set Scale-style calibration reference — same geometry,
+ *  just marked confirmed with that real length — before the view refits to the whole sketch. */
+@Composable
+private fun RoomCalibrateDialog(
+    asTappedDisplay: Float,
+    unitLabel: String,
+    onConfirm: (realValue: Double) -> Unit,
+    onSkip: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onSkip,
+        title = { Text("Top wall length") },
+        text = {
+            Column {
+                Text(
+                    "Your sketch is now straight walls. As drawn, the top (or most level) one reads " +
+                        "~${trimNum(asTappedDisplay.toDouble())}$unitLabel — type its actual length to scale the " +
+                        "whole sketch to match, or skip to keep it as drawn.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Actual length ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v == null || v <= 0.0) error = "Enter a valid length" else onConfirm(v)
+            }) { Text("Set scale") }
+        },
+        dismissButton = { TextButton(onClick = onSkip) { Text("Skip") } }
     )
 }
 
