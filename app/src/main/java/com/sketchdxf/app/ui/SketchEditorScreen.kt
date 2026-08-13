@@ -272,6 +272,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // most level (or longest) segment is offered as a scale reference before the view refits.
     var freehandRoomMode by remember { mutableStateOf(false) }
     var pendingRoomCalibrate by remember { mutableStateOf<Int?>(null) }
+    var pendingRoomIndices by remember { mutableStateOf<IntRange?>(null) }
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
@@ -428,7 +429,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     fun resetToolState() {
         lineStartPoint = null
-        pendingRect = null; pendingCircle = null; pendingRoomCalibrate = null
+        pendingRect = null; pendingCircle = null; pendingRoomCalibrate = null; pendingRoomIndices = null
         pendingImage = null; pendingImagePlacement = null
         zoomWindowArmed = false; zoomWinStart = null; zoomWinCurrent = null
         offsetLineIndex = -1
@@ -665,6 +666,37 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (viewHistory.size > 20) viewHistory.removeAt(0)
     }
 
+    /** Only adjusts the view if the shapes at [indices] aren't already comfortably on screen —
+     *  used after Room mode finishes a sketch. Unconditionally re-fitting every time (like
+     *  [fitToScreen] does) shifts the view right as the user is about to keep drawing from one of
+     *  its corners, so a tap aimed at where that corner *was* lands somewhere else entirely once
+     *  the ground has moved under it; only actually moving the view when the new geometry doesn't
+     *  already fit avoids that for the common case (drawn within the current view already). */
+    fun ensureShapesVisible(indices: IntRange) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        indices.forEach { idx ->
+            val b = shapeBounds(shapes[idx])
+            minX = minOf(minX, b.left); maxX = maxOf(maxX, b.right)
+            minY = minOf(minY, b.top); maxY = maxOf(maxY, b.bottom)
+        }
+        if (minX > maxX) return
+        val margin = 24f
+        fun sx(x: Float) = x * viewScale + viewOffset.x
+        fun sy(y: Float) = y * viewScale + viewOffset.y
+        val fits = sx(minX) >= margin && sx(maxX) <= cw - margin && sy(minY) >= margin && sy(maxY) <= ch - margin
+        if (fits) return
+        pushViewHistory()
+        val spanX = (maxX - minX).coerceAtLeast(1f)
+        val spanY = (maxY - minY).coerceAtLeast(1f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
+        val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
+        viewScale = scale
+        viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
+    }
+
     /** AutoCAD-style ZOOM Previous: steps back to the view exactly as it was before the last
      *  zoom/pan gesture, Zoom Window, or Zoom All — a no-op with nothing to go back to. */
     fun zoomPrevious() {
@@ -815,6 +847,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y, color = currentColor?.toArgb()))
         }
         val newIndices = firstIndex until shapes.size
+        pendingRoomIndices = newIndices
         val levelThreshold = kotlin.math.sin(Math.toRadians(20.0)).toFloat()
         val levelCandidates = newIndices.filter { idx ->
             val s = shapes[idx]
@@ -1533,15 +1566,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     val mm = displayToMm(value, unit)
                     shapes[idx] = shapes[idx].copy(confirmed = true, realLength = mm)
                     pendingRoomCalibrate = null
-                    fitToScreen()
+                    pendingRoomIndices?.let { ensureShapesVisible(it) }
+                    pendingRoomIndices = null
                 },
                 onSkip = {
                     pendingRoomCalibrate = null
-                    fitToScreen()
+                    pendingRoomIndices?.let { ensureShapesVisible(it) }
+                    pendingRoomIndices = null
                 }
             )
         } else {
             pendingRoomCalibrate = null
+            pendingRoomIndices = null
         }
     }
     pendingImagePlacement?.let { p ->
