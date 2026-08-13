@@ -1544,14 +1544,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             pendingRoomCalibrate = null
         }
     }
-    if (showImageSourceDialog) {
-        ImageSourceDialog(
-            onGallery = { imageGalleryPicker.launch("image/*") },
-            onCamera = { showImageSourceDialog = false; launchImageCamera() },
-            onPdf = { imagePdfPicker.launch(arrayOf("application/pdf")) },
-            onDismiss = { showImageSourceDialog = false }
-        )
-    }
     pendingImagePlacement?.let { p ->
         val img = pendingImage
         if (img == null) {
@@ -1718,6 +1710,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         copied?.let { SketchAttachmentStore.delete(it.path) }
         if (bmp != null) insertImageFromBitmap(bmp)
     })
+    if (showImageSourceDialog) {
+        ImageSourceDialog(
+            onGallery = { imageGalleryPicker.launch("image/*") },
+            onCamera = { showImageSourceDialog = false; launchImageCamera() },
+            onPdf = { imagePdfPicker.launch(arrayOf("application/pdf")) },
+            onDismiss = { showImageSourceDialog = false }
+        )
+    }
 
     // Decodes each inserted image's file once (off the main thread) into imageBitmapCache, keyed
     // by path, for the Canvas draw loop below to just look up and blit — re-checks whenever the
