@@ -1469,6 +1469,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
+            onSetScale = { value ->
+                // Keeps this line's geometry exactly as drawn, but treats its current on-screen
+                // length as the typed real-world value — a calibration reference, same idea as the
+                // Distance tool, without stretching (and possibly sending) the endpoint off-screen.
+                // Locks in as the authoritative scale (like the Distance tool does) instead of just
+                // joining the pool currentPxPerMm() averages over every confirmed line — otherwise
+                // each additional confirmed line's own hand-drawn imprecision nudges that average,
+                // so a scale that was just explicitly set could silently drift again right after.
+                val mm = displayToMm(value, unit)
+                val cur = shapes[pendingLengthIndex]
+                val lenPx = hypotF(cur.x2 - cur.x1, cur.y2 - cur.y1)
+                shapes[pendingLengthIndex] = cur.copy(realLength = mm, confirmed = true)
+                if (mm > 0.0) { calibrationRatio = lenPx / mm.toFloat(); useCalibrationRatio = true }
+                if (wallModeOn) addWallOuterLine(pendingLengthIndex)
+                pendingLengthIndex = -1
+            },
             onCancel = {
                 if (pendingLengthIndex in shapes.indices) shapes.removeAt(pendingLengthIndex)
                 if (undoStack.isNotEmpty()) undoStack.removeAt(undoStack.lastIndex)
@@ -3130,6 +3146,7 @@ private fun LineFinishDialog(
     showAngleField: Boolean,
     onApply: (value: Double?, angleDeg: Float?) -> Unit,
     onUseAsIs: () -> Unit,
+    onSetScale: (value: Double) -> Unit,
     onCancel: () -> Unit
 ) {
     var lengthText by remember { mutableStateOf("") }
@@ -3160,6 +3177,15 @@ private fun LineFinishDialog(
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                Text(
+                    "\"Apply\" stretches this line on screen to match the length you type — for a " +
+                        "long real measurement that can send the far end well outside the current " +
+                        "view. \"Set Scale\" instead keeps the line exactly as drawn and treats its " +
+                        "current on-screen length as that real value, adjusting every future " +
+                        "measurement (and Dimension readings on it) to match — nothing moves.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
                 if (showAngleField) {
                     OutlinedTextField(
                         value = angleText, onValueChange = { angleText = it; error = null }, singleLine = true,
@@ -3183,7 +3209,15 @@ private fun LineFinishDialog(
                 }
             }) { Text("Apply") }
         },
-        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as tapped") } }
+        dismissButton = {
+            Row {
+                TextButton(onClick = onUseAsIs) { Text("Use as tapped") }
+                TextButton(onClick = {
+                    val value = lengthText.toDoubleOrNull()
+                    if (value == null) error = "Type the exact length first" else onSetScale(value)
+                }) { Text("Set Scale") }
+            }
+        }
     )
 }
 
