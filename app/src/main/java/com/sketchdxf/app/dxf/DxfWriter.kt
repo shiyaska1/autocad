@@ -73,36 +73,13 @@ object DxfWriter {
                     listOf(Entity.Line(x1, y1, x2, y2, s.color))
                 }
                 ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale, s.color))
-                ShapeKind.TEXT -> if (s.label.isNotBlank()) {
-                    val height = if (s.fontSize > 0f) s.fontSize.toDouble() else 3.0
-                    listOf(Entity.Text(sx(s.x1), sy(s.y1), height, s.label, s.color))
-                } else emptyList()
+                ShapeKind.TEXT -> if (s.label.isNotBlank()) listOf(Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label, s.color)) else emptyList()
                 ShapeKind.DIMENSION -> {
                     // Not a live/associative DXF DIMENSION entity — a plain line + text label that
                     // reads correctly when opened, without needing a dimension-style block setup.
-                    // If the dimension line is offset from the measured points (SketchShape.dimOffset),
-                    // mirror that here too: the dimension line itself sits off to the side, with
-                    // extension lines connecting it back to the actual measured points, matching what
-                    // the editor and the exported preview both show.
-                    var bx1 = s.x1; var by1 = s.y1; var bx2 = s.x2; var by2 = s.y2
-                    if (s.dimOffset != 0f) {
-                        val dx = s.x2 - s.x1; val dy = s.y2 - s.y1
-                        val lenPx = hypot(dx.toDouble(), dy.toDouble()).toFloat()
-                        if (lenPx > 1e-3f) {
-                            val nx = -dy / lenPx * s.dimOffset; val ny = dx / lenPx * s.dimOffset
-                            bx1 += nx; by1 += ny; bx2 += nx; by2 += ny
-                        }
-                    }
-                    val x1 = sx(bx1); val y1 = sy(by1); val x2 = sx(bx2); val y2 = sy(by2)
+                    val x1 = sx(s.x1); val y1 = sy(s.y1); val x2 = sx(s.x2); val y2 = sy(s.y2)
                     val entities = mutableListOf<Entity>(Entity.Line(x1, y1, x2, y2, s.color))
-                    if (s.dimOffset != 0f) {
-                        entities.add(Entity.Line(sx(s.x1), sy(s.y1), x1, y1, s.color))
-                        entities.add(Entity.Line(sx(s.x2), sy(s.y2), x2, y2, s.color))
-                    }
-                    if (s.label.isNotBlank()) {
-                        val height = if (s.fontSize > 0f) s.fontSize.toDouble() else 2.5
-                        entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, height, s.label, s.color))
-                    }
+                    if (s.label.isNotBlank()) entities.add(Entity.Text((x1 + x2) / 2, (y1 + y2) / 2 + 1.5, 2.5, s.label, s.color))
                     entities
                 }
                 ShapeKind.FREEHAND -> SketchPath.parse(s.path).zipWithNext { (ax, ay), (bx, by) ->
