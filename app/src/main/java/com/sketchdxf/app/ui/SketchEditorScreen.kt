@@ -606,6 +606,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         )
     }
 
+    /** Re-centres the view on [p] (keeping the current zoom) if it isn't already comfortably on
+     *  screen — used right after typing an exact length moves a line's endpoint somewhere far from
+     *  where it was roughly tapped, so the point you'd continue drawing from is immediately visible
+     *  instead of needing to be hunted down by hand afterward. */
+    fun ensurePointVisible(p: Offset) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        val screenX = p.x * viewScale + viewOffset.x
+        val screenY = p.y * viewScale + viewOffset.y
+        val margin = 48f
+        if (screenX in margin..(cw - margin) && screenY in margin..(ch - margin)) return
+        viewOffset = clampViewOffset(Offset(cw / 2f - p.x * viewScale, ch / 2f - p.y * viewScale), viewScale)
+    }
+
     /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
      *  fits back on screen at once. */
     fun fitToScreen() {
@@ -1296,6 +1310,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 } else {
                     cur.copy(x2 = newEnd.x, y2 = newEnd.y)
                 }
+                // Chain mode armed the next line's start at this line's rough tapped endpoint —
+                // now that an exact length/angle has moved the real endpoint (often much further
+                // away), the chained continuation needs to follow it, or the next line would
+                // silently start from the wrong, stale point.
+                if (chainOn) lineStartPoint = newEnd
+                ensurePointVisible(newEnd)
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
