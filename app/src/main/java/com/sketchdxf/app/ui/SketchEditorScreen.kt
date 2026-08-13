@@ -1,5 +1,6 @@
 package com.sketchdxf.app.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,17 +15,17 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Straighten
@@ -61,9 +63,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -84,8 +88,11 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -98,13 +105,18 @@ import com.sketchdxf.app.data.SketchCircleFit
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
+import com.sketchdxf.app.dxf.BitmapUtil
 import com.sketchdxf.app.dxf.DxfReader
 import com.sketchdxf.app.dxf.DxfWriter
+import com.sketchdxf.app.dxf.PdfPageRenderer
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.PreviewRenderer
 import com.sketchdxf.app.dxf.SketchAttachmentStore
+import com.sketchdxf.app.ocr.rememberImageCamera
 import com.sketchdxf.app.ui.common.HandwriteInputDialog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.atan2
@@ -124,7 +136,11 @@ private fun hypotF(x: Float, y: Float): Float = hypot(x.toDouble(), y.toDouble()
  * its own exclusive tool. With [requireTwoFingers] false (the dedicated Pan/Zoom tool), a single
  * finger drags the view too, matching the old behaviour there.
  */
-private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean, onGesture: (pan: Offset, zoom: Float) -> Unit) {
+private suspend fun PointerInputScope.detectPanOrZoom(
+    requireTwoFingers: Boolean,
+    onGestureStart: () -> Unit = {},
+    onGesture: (pan: Offset, zoom: Float) -> Unit
+) {
     awaitEachGesture {
         var zoom = 1f
         var pan = Offset.Zero
@@ -143,7 +159,10 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
                     pan += panChange
                     val centroidSize = event.calculateCentroidSize(useCurrent = false)
                     val zoomMotion = abs(1 - zoom) * centroidSize
-                    if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) pastTouchSlop = true
+                    if (zoomMotion > touchSlop || pan.getDistance() > touchSlop) {
+                        pastTouchSlop = true
+                        onGestureStart()
+                    }
                 }
                 if (pastTouchSlop) {
                     if (zoomChange != 1f || panChange != Offset.Zero) onGesture(panChange, zoomChange)
@@ -154,7 +173,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK, IMAGE }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -172,6 +191,15 @@ private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
 @Composable
 fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     val context = LocalContext.current
+    val androidView = LocalView.current
+    // The canvas reaches close to the screen edges, so Android's own edge-swipe-back gesture can
+    // otherwise steal a drag that starts/ends near the left or right border — see the canvas Box's
+    // onGloballyPositioned below, which keeps this in sync with its actual on-screen bounds.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= 29) androidView.systemGestureExclusionRects = emptyList()
+        }
+    }
     val scope = rememberCoroutineScope()
     val dao = remember { AppDatabase.get(context).sketchDao() }
     var savedBlocks by remember { mutableStateOf<List<SketchBlock>>(emptyList()) }
@@ -235,10 +263,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var dragCurrent by remember { mutableStateOf<Offset?>(null) }
     var editingIndex by remember { mutableStateOf(-1) }
     var pendingTextPos by remember { mutableStateOf<Offset?>(null) }
+    // Rectangle/Circle work the same way Line does: the drag places it roughly, then a dialog
+    // offers to type exact real-world dimensions instead of trusting the tapped/dragged size.
+    var pendingRect by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
+    var pendingCircle by remember { mutableStateOf<Pair<Offset, Float>?>(null) }
+    // Freehand "Room" mode: a hand-drawn stroke is auto-straightened into wall segments, then the
+    // most level (or longest) segment is offered as a scale reference before the view refits.
+    var freehandRoomMode by remember { mutableStateOf(false) }
+    var pendingRoomCalibrate by remember { mutableStateOf<Int?>(null) }
+    var pendingRoomIndices by remember { mutableStateOf<IntRange?>(null) }
     var showRoomPlan by remember { mutableStateOf(false) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var busy by remember { mutableStateOf(false) }
     var dxfImportMessage by remember { mutableStateOf<String?>(null) }
+    // Both Cancel (the X icon) and the app bar's back arrow leave without saving — confirm first
+    // so an accidental tap can't silently discard work.
+    var showCloseConfirm by remember { mutableStateOf(false) }
 
     // Current draw colour — applies to every newly-drawn shape (Line, Circle, Rectangle,
     // Freehand, Text, Dimension, Room plan); null means "use this shape kind's usual default"
@@ -262,19 +302,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
-
-    /** Keeps the drawing area always at least partly on screen — panning/zooming can't drag the
-     *  whole thing out of view (when zoomed in, the viewport can't go past the content's edges;
-     *  when zoomed out, the smaller content can't be pushed fully off the visible area). */
-    fun clampViewOffset(offset: Offset, scale: Float): Offset {
-        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
-        if (cw <= 0f || ch <= 0f) return offset
-        val slackX = cw - cw * scale; val slackY = ch - ch * scale
-        return Offset(
-            offset.x.coerceIn(minOf(0f, slackX), maxOf(0f, slackX)),
-            offset.y.coerceIn(minOf(0f, slackY), maxOf(0f, slackY))
-        )
-    }
+    // AutoCAD-style Zoom Window/All/Previous, offered as sub-actions of the Pan/Zoom tool.
+    val viewHistory = remember { mutableStateListOf<Pair<Float, Offset>>() }
+    var zoomWindowArmed by remember { mutableStateOf(false) }
+    var zoomWinStart by remember { mutableStateOf<Offset?>(null) }
+    var zoomWinCurrent by remember { mutableStateOf<Offset?>(null) }
 
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
@@ -326,8 +358,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var selectDragStart by remember { mutableStateOf<Offset?>(null) }
     var selectDragCurrent by remember { mutableStateOf<Offset?>(null) }
     var moveModeActive by remember { mutableStateOf(false) }
+    // Copy works the same way as Move (armed, then a drag on the canvas supplies the placement)
+    // instead of pasting an instant fixed-offset copy — so the user aims each copy by hand.
+    var copyModeActive by remember { mutableStateOf(false) }
     var moveDragStart by remember { mutableStateOf<Offset?>(null) }
     var moveDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
+    // would land on — shown as a highlight, and used as the actual drop point on release.
+    var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
+
+    // Grip editing (Tool.SELECT): dragging a LINE/DIMENSION endpoint reshapes just that end,
+    // instead of moving the whole shape — same idea as AutoCAD's blue grip squares.
+    var gripDragIndex by remember { mutableStateOf(-1) }
+    var gripDragPart by remember { mutableStateOf(0) } // 1 = x1/y1 endpoint, 2 = x2/y2 endpoint
+    var selectTapStart by remember { mutableStateOf<Offset?>(null) }
 
     // Break: tap the line, tap the first break point, tap the second — the segment between the
     // two (projected onto the line) is removed. Tapping both points at nearly the same spot
@@ -362,6 +406,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
 
+    // Insert Image: pick from Gallery/Camera/PDF, tap where it goes, then type its real-world
+    // width — height follows the source image's own aspect ratio. pendingImage holds the copied
+    // file's path plus its native pixel size (for that aspect ratio); pendingImagePlacement holds
+    // the tapped drop point while the width dialog is open.
+    var showImageSourceDialog by remember { mutableStateOf(false) }
+    var pendingImage by remember { mutableStateOf<Triple<String, Int, Int>?>(null) }
+    var pendingImagePlacement by remember { mutableStateOf<Offset?>(null) }
+    val imageBitmapCache = remember { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
+
     // Stretch: drag a crossing box — only the endpoints inside it are captured (a fully-enclosed
     // shape moves as a whole; a shape with just one end inside gets genuinely stretched). Then tap
     // a base point and a second point for the direction; an exact distance can override afterward.
@@ -375,6 +428,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     fun resetToolState() {
         lineStartPoint = null
+        pendingRect = null; pendingCircle = null; pendingRoomCalibrate = null; pendingRoomIndices = null
+        pendingImage = null; pendingImagePlacement = null
+        zoomWindowArmed = false; zoomWinStart = null; zoomWinCurrent = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
         extendBoundaryIndex = -1; extendMessage = null
@@ -382,7 +438,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         freehandPoints.clear()
         selectedIndices.clear()
         selectDragStart = null; selectDragCurrent = null
-        moveModeActive = false; moveDragStart = null; moveDragCurrent = null
+        moveModeActive = false; copyModeActive = false
+        moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
+        gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
         breakLineIndex = -1; breakPoint1 = null
         filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
         stretchPoints.clear()
@@ -394,11 +452,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         lastWallInnerEnd = null; lastWallOuterIndex = -1
     }
 
-    /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
-    fun trySnapPoint(p: Offset): Offset {
-        if (!snapOn) return p
-        var best = p; var bestDist = 28f
-        shapes.forEach { s ->
+    /** Converts a desired on-screen touch tolerance (px) into the equivalent distance in this
+     *  canvas's own local/content space at the CURRENT zoom — the same idea as the drawing loop's
+     *  minPx(), just usable outside it. Every hit-test/snap radius below used to be a fixed content-
+     *  space constant, so the actual on-screen tap target it represented shrank right along with
+     *  the content whenever zoomed out — a 26px-equivalent radius became a couple of real screen
+     *  pixels at, say, 10% zoom, making anything hard to select/snap/grab precisely right when
+     *  zooming out to reach it in the first place should have made it easier. */
+    fun screenPxToContent(px: Float): Float = px / viewScale.coerceAtLeast(0.001f)
+
+    /** Nearest existing line endpoint/midpoint within range, excluding shapes at [excludeIndices]
+     *  (e.g. the ones currently being moved/copied, so a selection doesn't snap to itself) — null
+     *  when nothing is close enough. Used both to snap a single tapped point and to highlight the
+     *  point a live Move/Copy drag would land on. */
+    fun findSnapPoint(p: Offset, excludeIndices: Collection<Int> = emptyList()): Offset? {
+        if (!snapOn) return null
+        // Deliberately tighter than the 26-28px hit-test radii below — snapping is a much more
+        // surprising thing to happen without asking (it silently redirects where a new point
+        // lands), so it should only kick in when a tap is genuinely close to an existing point,
+        // not just "somewhere in the neighborhood" of one.
+        var best: Offset? = null; var bestDist = screenPxToContent(16f)
+        shapes.forEachIndexed { i, s ->
+            if (i in excludeIndices) return@forEachIndexed
             if (s.kind == ShapeKind.LINE) {
                 listOf(Offset(s.x1, s.y1), Offset(s.x2, s.y2), Offset((s.x1 + s.x2) / 2f, (s.y1 + s.y2) / 2f)).forEach { c ->
                     val d = hypotF(p.x - c.x, p.y - c.y)
@@ -408,6 +483,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
         return best
     }
+
+    /** Snaps to the nearest existing line's endpoint/midpoint within range, else returns [p]. */
+    fun trySnapPoint(p: Offset): Offset = findSnapPoint(p) ?: p
 
     /** Locks [raw] onto the horizontal or vertical line through [start], whichever is closer —
      *  the end point keeps its tapped distance along that axis, like AutoCAD's Ortho mode. */
@@ -427,7 +505,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
 
     fun hitTestLine(p: Offset): Int {
-        var best = -1; var bestDist = 26f
+        var best = -1; var bestDist = screenPxToContent(26f)
         shapes.forEachIndexed { i, s ->
             if (s.kind == ShapeKind.LINE) {
                 val d = distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
@@ -462,8 +540,36 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return hypotF(dx, dy)
     }
 
+    /** The actual dimension-line endpoints for a DIMENSION shape: [SketchShape.x1,y1]/[x2,y2]
+     *  offset perpendicular to the measured segment by [SketchShape.dimOffset] px, so the
+     *  dimension line (and its text) sit clear of the object being measured instead of drawn
+     *  right on top of it — with short extension lines back to the actual measured points, like a
+     *  real AutoCAD linear dimension. dimOffset == 0 (e.g. dimensions saved before this existed)
+     *  draws exactly on the measured points, unchanged from before. */
+    fun dimLineEndpoints(s: SketchShape): Pair<Offset, Offset> {
+        val base1 = Offset(s.x1, s.y1); val base2 = Offset(s.x2, s.y2)
+        if (s.dimOffset == 0f) return base1 to base2
+        val dx = s.x2 - s.x1; val dy = s.y2 - s.y1
+        val len = hypotF(dx, dy)
+        if (len < 1e-3f) return base1 to base2
+        val nx = -dy / len * s.dimOffset; val ny = dx / len * s.dimOffset
+        return Offset(base1.x + nx, base1.y + ny) to Offset(base2.x + nx, base2.y + ny)
+    }
+
+    /** Rough bounding rect of a DIMENSION's text label as actually drawn (see the drawing loop),
+     *  for hit-testing — the label sits at the offset line's midpoint but, especially at the
+     *  larger default text size, can extend well clear of the thin line itself, so tapping the
+     *  (much more visible) text needs to work even when it's not within reach of the line. Doesn't
+     *  need to be pixel-exact, just close enough to cover what's actually on screen. */
+    fun dimTextHitRect(s: SketchShape, p1: Offset, p2: Offset): androidx.compose.ui.geometry.Rect {
+        val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
+        val sizePx = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else screenPxToContent(34f)
+        val w = s.label.length * sizePx * 0.56f
+        return androidx.compose.ui.geometry.Rect(mx, my - sizePx, mx + w + screenPxToContent(8f), my + sizePx * 0.3f)
+    }
+
     fun hitTest(p: Offset): Int {
-        var best = -1; var bestDist = 26f
+        var best = -1; var bestDist = screenPxToContent(26f)
         shapes.forEachIndexed { i, s ->
             val d = when (s.kind) {
                 ShapeKind.LINE -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
@@ -472,7 +578,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     val (w, h) = textExtent(s)
                     distToRect(p, androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f))
                 }
-                ShapeKind.DIMENSION -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
+                ShapeKind.DIMENSION -> {
+                    // Hit-test the line as it's actually drawn (offset from the object, if any),
+                    // not the invisible measured segment — otherwise tapping the visible dimension
+                    // line/text wouldn't select it once it's drawn clear of the object. Also checks
+                    // the text label's own area, since it commonly sits well clear of the thin line.
+                    val (dp1, dp2) = dimLineEndpoints(s)
+                    val lineDist = distToSegment(p, dp1, dp2)
+                    if (s.label.isNotBlank()) minOf(lineDist, distToRect(p, dimTextHitRect(s, dp1, dp2))) else lineDist
+                }
                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
                     if (pts.size < 2) Float.MAX_VALUE
@@ -480,9 +594,29 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         .minOrNull() ?: Float.MAX_VALUE
                 }
                 ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
+                ShapeKind.IMAGE -> distToRect(
+                    p, androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
+                )
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    /** Finds a draggable grip (a LINE/DIMENSION endpoint) near [p] — a tighter radius than the
+     *  usual hit-test so grabbing an endpoint to reshape it doesn't fight with tapping the shape's
+     *  body to open its edit dialog. Returns the shape index and which end (1 = x1/y1, 2 = x2/y2),
+     *  or null if nothing is close enough. */
+    fun hitTestGrip(p: Offset): Pair<Int, Int>? {
+        var best: Pair<Int, Int>? = null; var bestDist = screenPxToContent(24f)
+        shapes.forEachIndexed { i, s ->
+            if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
+                val d1 = hypotF(p.x - s.x1, p.y - s.y1)
+                if (d1 < bestDist) { bestDist = d1; best = i to 1 }
+                val d2 = hypotF(p.x - s.x2, p.y - s.y2)
+                if (d2 < bestDist) { bestDist = d2; best = i to 2 }
+            }
         }
         return best
     }
@@ -502,11 +636,116 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val pts = arcPoints(s)
             androidx.compose.ui.geometry.Rect(pts.minOf { it.x }, pts.minOf { it.y }, pts.maxOf { it.x }, pts.maxOf { it.y })
         }
+        ShapeKind.DIMENSION -> {
+            // Covers both the measured points and the (possibly offset) drawn dimension line, so
+            // panning/box-select account for the extension lines too.
+            val (dp1, dp2) = dimLineEndpoints(s)
+            androidx.compose.ui.geometry.Rect(
+                minOf(s.x1, s.x2, dp1.x, dp2.x), minOf(s.y1, s.y2, dp1.y, dp2.y),
+                maxOf(s.x1, s.x2, dp1.x, dp2.x), maxOf(s.y1, s.y2, dp1.y, dp2.y)
+            )
+        }
         else -> androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
     }
 
+    /** Keeps the drawing area always reachable by panning — not just the nominal canvas box, but
+     *  the union of that box and every shape's own bounds. A shape confirmed at a real-world
+     *  length (e.g. a 1500mm wall) can easily extend far outside the canvas's own pixel box at
+     *  the current scale; clamping to just the canvas box (as this used to) made the far end of
+     *  a shape like that permanently unreachable by panning, and zoom alone couldn't shrink it
+     *  into view either — see the pinch-zoom handler's widened scale range below. */
+    fun clampViewOffset(offset: Offset, scale: Float): Offset {
+        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
+        if (cw <= 0f || ch <= 0f) return offset
+        var left = 0f; var top = 0f; var right = cw; var bottom = ch
+        shapes.forEach { s ->
+            val b = shapeBounds(s)
+            left = minOf(left, b.left); top = minOf(top, b.top)
+            right = maxOf(right, b.right); bottom = maxOf(bottom, b.bottom)
+        }
+        val minOffsetX = cw - right * scale; val maxOffsetX = -left * scale
+        val minOffsetY = ch - bottom * scale; val maxOffsetY = -top * scale
+        return Offset(
+            offset.x.coerceIn(minOf(minOffsetX, maxOffsetX), maxOf(minOffsetX, maxOffsetX)),
+            offset.y.coerceIn(minOf(minOffsetY, maxOffsetY), maxOf(minOffsetY, maxOffsetY))
+        )
+    }
+
+    /** Re-centres the view on [p] (keeping the current zoom) if it isn't already comfortably on
+     *  screen — used right after typing an exact length moves a line's endpoint somewhere far from
+     *  where it was roughly tapped, so the point you'd continue drawing from is immediately visible
+     *  instead of needing to be hunted down by hand afterward. */
+    fun ensurePointVisible(p: Offset) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        val screenX = p.x * viewScale + viewOffset.x
+        val screenY = p.y * viewScale + viewOffset.y
+        val margin = 48f
+        if (screenX in margin..(cw - margin) && screenY in margin..(ch - margin)) return
+        viewOffset = clampViewOffset(Offset(cw / 2f - p.x * viewScale, ch / 2f - p.y * viewScale), viewScale)
+    }
+
+    /** Records the current view before it's about to change, for [zoomPrevious] — same idea as
+     *  AutoCAD's ZOOM Previous, capped so the history can't grow without bound over a long session. */
+    fun pushViewHistory() {
+        viewHistory.add(viewScale to viewOffset)
+        if (viewHistory.size > 20) viewHistory.removeAt(0)
+    }
+
+    /** Only adjusts the view if the shapes at [indices] aren't already comfortably on screen —
+     *  used after Room mode finishes a sketch. Unconditionally re-fitting every time (like
+     *  [fitToScreen] does) shifts the view right as the user is about to keep drawing from one of
+     *  its corners, so a tap aimed at where that corner *was* lands somewhere else entirely once
+     *  the ground has moved under it; only actually moving the view when the new geometry doesn't
+     *  already fit avoids that for the common case (drawn within the current view already). */
+    fun ensureShapesVisible(indices: IntRange) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        indices.forEach { idx ->
+            val b = shapeBounds(shapes[idx])
+            minX = minOf(minX, b.left); maxX = maxOf(maxX, b.right)
+            minY = minOf(minY, b.top); maxY = maxOf(maxY, b.bottom)
+        }
+        if (minX > maxX) return
+        val margin = 24f
+        fun sx(x: Float) = x * viewScale + viewOffset.x
+        fun sy(y: Float) = y * viewScale + viewOffset.y
+        val fits = sx(minX) >= margin && sx(maxX) <= cw - margin && sy(minY) >= margin && sy(maxY) <= ch - margin
+        if (fits) return
+        pushViewHistory()
+        val spanX = (maxX - minX).coerceAtLeast(1f)
+        val spanY = (maxY - minY).coerceAtLeast(1f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
+        val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
+        viewScale = scale
+        viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
+    }
+
+    /** AutoCAD-style ZOOM Previous: steps back to the view exactly as it was before the last
+     *  zoom/pan gesture, Zoom Window, or Zoom All — a no-op with nothing to go back to. */
+    fun zoomPrevious() {
+        val prev = viewHistory.removeLastOrNull() ?: return
+        viewScale = prev.first; viewOffset = prev.second
+    }
+
+    /** AutoCAD-style Zoom Window: fits a rectangle given as two corner points (in the same
+     *  canvas-pixel space every shape's x/y is stored in) into view — used by the Pan/Zoom tool's
+     *  "Window" action once the user drags out the area they want. */
+    fun setViewportToRect(x1: Float, y1: Float, x2: Float, y2: Float) {
+        val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: return
+        val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
+        val spanX = abs(x2 - x1).coerceAtLeast(1f)
+        val spanY = abs(y2 - y1).coerceAtLeast(1f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
+        val midX = (x1 + x2) / 2f; val midY = (y1 + y2) / 2f
+        viewScale = scale
+        viewOffset = Offset(cw / 2f - midX * scale, ch / 2f - midY * scale)
+    }
+
     /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
-     *  fits back on screen at once. */
+     *  fits back on screen at once ("Zoom All"). */
     fun fitToScreen() {
         if (shapes.isEmpty()) return
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
@@ -520,10 +759,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: return
         val spanX = (maxX - minX).coerceAtLeast(1f)
         val spanY = (maxY - minY).coerceAtLeast(1f)
-        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.5f, 6f)
+        val scale = minOf(cw * 0.9f / spanX, ch * 0.9f / spanY).coerceIn(0.02f, 6f)
         val midX = (minX + maxX) / 2f; val midY = (minY + maxY) / 2f
+        pushViewHistory()
         viewScale = scale
         viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
+    }
+
+    /** Manual escape hatch for "my tap isn't landing where I tapped" — resets the view transform
+     *  (and clears any in-flight gesture/tool state that might be holding a stale drag/selection
+     *  point) back to a known-good baseline, rather than making the user hunt for what drifted.
+     *  Recomputes from the actual shapes/canvas size, same as [fitToScreen], so it self-corrects
+     *  regardless of what caused the drift; falls back to the identity transform when there's
+     *  nothing yet drawn to fit to. */
+    fun recalibrateView() {
+        resetToolState()
+        if (shapes.isNotEmpty()) {
+            fitToScreen()
+        } else {
+            pushViewHistory()
+            viewScale = 1f
+            viewOffset = Offset.Zero
+        }
     }
 
     /** Shifts a shape by (dx, dy) in canvas-pixel space — used by group Move and by Copy's paste offset. */
@@ -552,17 +809,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         pushUndo()
         selectedIndices.sortedDescending().forEach { shapes.removeAt(it) }
         selectedIndices.clear()
-    }
-
-    /** Duplicates every selected shape offset by a fixed paste distance, then selects the copies
-     *  so Move can immediately drag them into their real position. */
-    fun copySelection() {
-        if (selectedIndices.isEmpty()) return
-        pushUndo()
-        val pasteOffsetPx = 40f
-        val copies = selectedIndices.sorted().map { translateShape(shapes[it], pasteOffsetPx, pasteOffsetPx) }
-        selectedIndices.clear()
-        copies.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
     }
 
     /** Cleans up every selected FREEHAND stroke: one that's clearly meant as a circle (a closed
@@ -605,6 +851,58 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         shapes.addAll(newLines)
         selectedIndices.clear()
         selectedIndices.addAll(firstNewIndex until shapes.size)
+    }
+
+    /** AutoCAD-style Smooth: straightens the shaky jitter in one or more hand-drawn FREEHAND/
+     *  POLYLINE strokes while keeping any real corners — small wobbles collapse into a single
+     *  straight segment, larger genuine bends (an L-shaped wall, say) stay as separate segments.
+     *  Uses the Douglas-Peucker line-simplification algorithm; non-freehand shapes are untouched. */
+    fun smoothSelection() {
+        val targets = selectedIndices.filter {
+            val k = shapes.getOrNull(it)?.kind
+            k == ShapeKind.FREEHAND || k == ShapeKind.POLYLINE
+        }
+        if (targets.isEmpty()) return
+        pushUndo()
+        val tolerancePx = 14f
+        targets.forEach { idx ->
+            val s = shapes[idx]
+            val pts = SketchPath.parse(s.path).map { Offset(it.first, it.second) }
+            if (pts.size >= 3) {
+                val simplified = douglasPeucker(pts, tolerancePx)
+                shapes[idx] = s.copy(path = SketchPath.serialize(simplified.map { it.x to it.y }))
+            }
+        }
+    }
+
+    /** Freehand "Room" mode: straightens a hand-drawn stroke (Douglas-Peucker, same as Smooth)
+     *  straight into individual LINE wall segments — no separate FREEHAND/Explode step needed —
+     *  then arms [pendingRoomCalibrate] on whichever segment reads most like "the top wall": the
+     *  most level (within ~20° of horizontal) and topmost of those, or just the longest segment if
+     *  nothing drawn is roughly level. */
+    fun finishFreehandRoom(points: List<Offset>) {
+        if (points.size < 2) return
+        val simplified = douglasPeucker(points, 14f)
+        if (simplified.size < 2) return
+        pushUndo()
+        val firstIndex = shapes.size
+        simplified.zipWithNext { a, b ->
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y, color = currentColor?.toArgb()))
+        }
+        val newIndices = firstIndex until shapes.size
+        pendingRoomIndices = newIndices
+        val levelThreshold = kotlin.math.sin(Math.toRadians(20.0)).toFloat()
+        val levelCandidates = newIndices.filter { idx ->
+            val s = shapes[idx]
+            val dx = s.x2 - s.x1; val dy = s.y2 - s.y1
+            val len = hypotF(dx, dy)
+            len > 1e-3f && abs(dy) / len < levelThreshold
+        }
+        pendingRoomCalibrate = if (levelCandidates.isNotEmpty()) {
+            levelCandidates.minByOrNull { (shapes[it].y1 + shapes[it].y2) / 2f }
+        } else {
+            newIndices.maxByOrNull { hypotF(shapes[it].x2 - shapes[it].x1, shapes[it].y2 - shapes[it].y1) }
+        }
     }
 
     /** Applies one line width (px) to every selected shape that draws a stroke — everything
@@ -1081,6 +1379,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
     }
 
+    if (showCloseConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCloseConfirm = false },
+            title = { Text("Close without saving?") },
+            text = { Text("Any changes since your last Save will be lost.") },
+            confirmButton = {
+                TextButton(onClick = { showCloseConfirm = false; onBack() }) {
+                    Text("Close", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") } }
+        )
+    }
     if (editingIndex >= 0 && editingIndex < shapes.size) {
         ShapeEditDialog(
             shape = shapes[editingIndex],
@@ -1096,7 +1407,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             initial = "",
             showFontSize = true,
             unitLabel = unit,
-            onConfirm = { text, _, fontSizeMm, _ ->
+            onConfirm = { text, _, fontSizeMm, _, _ ->
                 if (text.isNotBlank()) {
                     pushUndo()
                     shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm))
@@ -1145,6 +1456,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 } else {
                     cur.copy(x2 = newEnd.x, y2 = newEnd.y)
                 }
+                // Chain mode armed the next line's start at this line's rough tapped endpoint —
+                // now that an exact length/angle has moved the real endpoint (often much further
+                // away), the chained continuation needs to follow it, or the next line would
+                // silently start from the wrong, stale point.
+                if (chainOn) lineStartPoint = newEnd
+                ensurePointVisible(newEnd)
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
@@ -1202,14 +1519,129 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     pendingDimension?.let { (p1, p2) ->
         val measuredMm = hypotF(p2.x - p1.x, p2.y - p1.y) / currentPxPerMm()
         DimensionTextDialog(
-            initialText = "${trimNum(mmToDisplay(measuredMm.toDouble(), unit))}$unit",
-            onConfirm = { text ->
+            initialText = trimNum(mmToDisplay(measuredMm.toDouble(), unit)),
+            unitLabel = unit,
+            onConfirm = { text, fontSizeMm, offsetPx ->
                 pushUndo()
-                shapes.add(SketchShape(workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, label = text, color = currentColor?.toArgb()))
+                shapes.add(
+                    SketchShape(
+                        workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y,
+                        label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm, dimOffset = offsetPx
+                    )
+                )
                 pendingDimension = null
             },
             onCancel = { pendingDimension = null }
         )
+    }
+    pendingRect?.let { (s, c) ->
+        val lengthMm = abs(c.x - s.x) / currentPxPerMm()
+        val heightMm = abs(c.y - s.y) / currentPxPerMm()
+        fun addRect(corner1: Offset, corner2: Offset, lengthMm: Double?, heightMm: Double?) {
+            pushUndo()
+            val p2 = Offset(corner2.x, corner1.y); val p4 = Offset(corner1.x, corner2.y)
+            val rectColor = currentColor?.toArgb()
+            val lenConfirmed = lengthMm != null; val hgtConfirmed = heightMm != null
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = corner1.x, y1 = corner1.y, x2 = p2.x, y2 = p2.y, color = rectColor, confirmed = lenConfirmed, realLength = lengthMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = corner2.x, y2 = corner2.y, color = rectColor, confirmed = hgtConfirmed, realLength = heightMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = corner2.x, y1 = corner2.y, x2 = p4.x, y2 = p4.y, color = rectColor, confirmed = lenConfirmed, realLength = lengthMm ?: 0.0))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = corner1.x, y2 = corner1.y, color = rectColor, confirmed = hgtConfirmed, realLength = heightMm ?: 0.0))
+        }
+        RectangleFinishDialog(
+            asLengthDisplay = mmToDisplay(lengthMm.toDouble(), unit).toFloat(),
+            asHeightDisplay = mmToDisplay(heightMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            onApply = { lengthVal, heightVal ->
+                val lenMm = lengthVal?.let { displayToMm(it, unit) }
+                val hgtMm = heightVal?.let { displayToMm(it, unit) }
+                val signX = if (c.x >= s.x) 1f else -1f; val signY = if (c.y >= s.y) 1f else -1f
+                val wPx = lenMm?.let { (it.toFloat() * currentPxPerMm()) } ?: abs(c.x - s.x)
+                val hPx = hgtMm?.let { (it.toFloat() * currentPxPerMm()) } ?: abs(c.y - s.y)
+                val corner2 = Offset(s.x + signX * wPx, s.y + signY * hPx)
+                addRect(s, corner2, lenMm, hgtMm)
+                pendingRect = null
+            },
+            onUseAsIs = {
+                addRect(s, c, null, null)
+                pendingRect = null
+            },
+            onCancel = { pendingRect = null }
+        )
+    }
+    pendingCircle?.let { (center, radiusPx) ->
+        val asTappedMm = radiusPx / currentPxPerMm()
+        CircleFinishDialog(
+            asTappedDisplay = mmToDisplay(asTappedMm.toDouble(), unit).toFloat(),
+            unitLabel = unit,
+            onApply = { value ->
+                pushUndo()
+                val rPx = displayToMm(value, unit).toFloat() * currentPxPerMm()
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = center.x, cy = center.y, r = rPx, color = currentColor?.toArgb()))
+                pendingCircle = null
+            },
+            onUseAsIs = {
+                pushUndo()
+                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = center.x, cy = center.y, r = radiusPx, color = currentColor?.toArgb()))
+                pendingCircle = null
+            },
+            onCancel = { pendingCircle = null }
+        )
+    }
+    pendingRoomCalibrate?.let { idx ->
+        if (idx in shapes.indices) {
+            val line = shapes[idx]
+            val lenPx = hypotF(line.x2 - line.x1, line.y2 - line.y1)
+            val asTappedMm = lenPx / currentPxPerMm()
+            RoomCalibrateDialog(
+                asTappedDisplay = mmToDisplay(asTappedMm.toDouble(), unit).toFloat(),
+                unitLabel = unit,
+                onConfirm = { value ->
+                    val mm = displayToMm(value, unit)
+                    // Locks this in as the authoritative ratio instead of letting it just join
+                    // currentPxPerMm()'s running average over every confirmed line, which would let
+                    // later confirmed lines quietly drift it.
+                    if (mm > 0.0) { calibrationRatio = lenPx / mm.toFloat(); useCalibrationRatio = true }
+                    shapes[idx] = shapes[idx].copy(confirmed = true, realLength = mm)
+                    pendingRoomCalibrate = null
+                    pendingRoomIndices?.let { ensureShapesVisible(it) }
+                    pendingRoomIndices = null
+                },
+                onSkip = {
+                    pendingRoomCalibrate = null
+                    pendingRoomIndices?.let { ensureShapesVisible(it) }
+                    pendingRoomIndices = null
+                }
+            )
+        } else {
+            pendingRoomCalibrate = null
+            pendingRoomIndices = null
+        }
+    }
+    pendingImagePlacement?.let { p ->
+        val img = pendingImage
+        if (img == null) {
+            pendingImagePlacement = null
+        } else {
+            val (path, nativeW, nativeH) = img
+            ImageWidthDialog(
+                unitLabel = unit,
+                onConfirm = { widthValue ->
+                    pushUndo()
+                    val wPx = displayToMm(widthValue, unit).toFloat() * currentPxPerMm()
+                    val hPx = wPx * nativeH / nativeW.coerceAtLeast(1)
+                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.IMAGE, x1 = p.x, y1 = p.y, x2 = p.x + wPx, y2 = p.y + hPx, path = path))
+                    pendingImage = null
+                    pendingImagePlacement = null
+                    // Deliberately NOT switching tool here — it used to jump to Select, which
+                    // silently ate the next tap or two (opening the image's own edit dialog
+                    // instead of starting whatever the user actually meant to draw next). Staying
+                    // on Image is a safe no-op until a different tool is explicitly picked.
+                },
+                onCancel = {
+                    pendingImagePlacement = null
+                }
+            )
+        }
     }
     pendingDistancePx?.let { px ->
         DistanceCalibrationDialog(
@@ -1323,6 +1755,58 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (uri != null) importDxf(uri)
     }
 
+    /** Saves [bmp] as a permanent attachment and arms it for placement — the next tap on the
+     *  canvas (Tool.IMAGE) sets [pendingImagePlacement], which then asks for a real-world width. */
+    fun insertImageFromBitmap(bmp: Bitmap) {
+        val target = SketchAttachmentStore.newFile(context, "insert", "png")
+        val saved = runCatching {
+            java.io.FileOutputStream(target).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }.isSuccess
+        if (saved) {
+            pendingImage = Triple(target.absolutePath, bmp.width, bmp.height)
+            tool = Tool.IMAGE
+            showImageSourceDialog = false
+        }
+    }
+
+    val imageGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            val copied = SketchAttachmentStore.copyIn(context, uri)
+            val bmp = copied?.let { BitmapUtil.decodeOriented(it.path) }
+            copied?.let { SketchAttachmentStore.delete(it.path) }
+            if (bmp != null) insertImageFromBitmap(bmp)
+        }
+    }
+    val imagePdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) PdfPageRenderer.renderPages(context, uri).firstOrNull()?.let { insertImageFromBitmap(it) }
+    }
+    val launchImageCamera = rememberImageCamera(onImage = { uri ->
+        val copied = SketchAttachmentStore.copyIn(context, uri)
+        val bmp = copied?.let { BitmapUtil.decodeOriented(it.path) }
+        copied?.let { SketchAttachmentStore.delete(it.path) }
+        if (bmp != null) insertImageFromBitmap(bmp)
+    })
+    if (showImageSourceDialog) {
+        ImageSourceDialog(
+            onGallery = { imageGalleryPicker.launch("image/*") },
+            onCamera = { showImageSourceDialog = false; launchImageCamera() },
+            onPdf = { imagePdfPicker.launch(arrayOf("application/pdf")) },
+            onDismiss = { showImageSourceDialog = false }
+        )
+    }
+
+    // Decodes each inserted image's file once (off the main thread) into imageBitmapCache, keyed
+    // by path, for the Canvas draw loop below to just look up and blit — re-checks whenever the
+    // number of IMAGE shapes changes (new insert, undo, delete).
+    val imageShapeCount = shapes.count { it.kind == ShapeKind.IMAGE }
+    LaunchedEffect(imageShapeCount) {
+        val paths = shapes.filter { it.kind == ShapeKind.IMAGE }.map { it.path }.distinct()
+        paths.filter { it !in imageBitmapCache }.forEach { path ->
+            val bmp = withContext(Dispatchers.IO) { BitmapUtil.decodeOriented(path, maxDim = 1600) }
+            if (bmp != null) imageBitmapCache[path] = bmp.asImageBitmap()
+        }
+    }
+
     fun runCommand(raw: String) {
         val transparent = raw.trim().startsWith("'")
         val cmd = raw.trim().removePrefix("'").uppercase()
@@ -1374,12 +1858,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             label = { Text("Name") }, modifier = Modifier.fillMaxWidth()
                         )
                     },
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    navigationIcon = { IconButton(onClick = { showCloseConfirm = true }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                     actions = {
                         IconButton(onClick = { dxfPicker.launch(arrayOf("*/*")) }) { Icon(Icons.Filled.UploadFile, "Import DXF") }
                         IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
                         IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
                         IconButton(onClick = { fitToScreen() }) { Icon(Icons.Filled.FitScreen, "Fit all shapes on screen") }
+                        IconButton(onClick = { recalibrateView() }) { Icon(Icons.Filled.Refresh, "Recalibrate screen") }
                         IconButton(onClick = { fullscreenCanvas = true }) { Icon(Icons.Filled.Fullscreen, "Fullscreen canvas") }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -1395,8 +1880,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             if (!fullscreenCanvas) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Close/Save lead the same scrolling row as the tools instead of sitting on their
+                // own row underneath — one row of vertical space back for the canvas.
+                IconButton(onClick = { showCloseConfirm = true }, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
+                IconButton(onClick = { save() }, enabled = !busy && loaded) {
+                    if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Filled.Save, "Save")
+                }
                 FilterChip(selected = tool == Tool.SELECT, onClick = {
                     tool = Tool.SELECT; resetToolState()
                 }, label = { Icon(Icons.Filled.NearMe, "Select") })
@@ -1457,6 +1950,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
                 FilterChip(selected = tool == Tool.BLOCK, onClick = { showBlockPicker = true },
                     label = { Text("Block") })
+                FilterChip(selected = tool == Tool.IMAGE, onClick = { showImageSourceDialog = true },
+                    label = { Text("Image") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {
@@ -1471,14 +1966,23 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 )
             }
-            // Icon-sized and pinned right under the tools, not at the bottom of the screen — the
-            // full-width text buttons that used to live there could end up below the fold (or
-            // behind the keyboard) once the canvas was scrolled/zoomed, making Save hard to reach.
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
-                IconButton(onClick = onBack, enabled = !busy) { Icon(Icons.Filled.Close, "Cancel") }
-                IconButton(onClick = { save() }, enabled = !busy && loaded) {
-                    if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.Filled.Save, "Save")
+            if (tool == Tool.PAN) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = zoomWindowArmed,
+                        onClick = { zoomWindowArmed = !zoomWindowArmed },
+                        label = { Text("Window") }
+                    )
+                    FilterChip(selected = false, onClick = { fitToScreen() }, label = { Text("All") })
+                    FilterChip(
+                        selected = false, onClick = { zoomPrevious() },
+                        enabled = viewHistory.isNotEmpty(),
+                        label = { Text("Previous") }
+                    )
                 }
             }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
@@ -1488,8 +1992,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("${selectedIndices.size} selected", style = MaterialTheme.typography.bodySmall)
-                    FilterChip(selected = moveModeActive, onClick = { moveModeActive = !moveModeActive }, label = { Text("Move") })
-                    FilterChip(selected = false, onClick = { copySelection() }, label = { Text("Copy") })
+                    FilterChip(
+                        selected = moveModeActive,
+                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) copyModeActive = false },
+                        label = { Text("Move") }
+                    )
+                    FilterChip(
+                        selected = copyModeActive,
+                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) moveModeActive = false },
+                        label = { Text("Copy") }
+                    )
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
                         FilterChip(
@@ -1500,9 +2012,16 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
                         FilterChip(selected = false, onClick = { explodeSelection() }, label = { Text("Explode") })
                     }
+                    if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND || shapes.getOrNull(it)?.kind == ShapeKind.POLYLINE }) {
+                        FilterChip(selected = false, onClick = { smoothSelection() }, label = { Text("Smooth") })
+                    }
                     FilterChip(selected = false, onClick = { showGroupWidthDialog = true }, label = { Text("Width") })
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
-                    FilterChip(selected = false, onClick = { selectedIndices.clear(); moveModeActive = false }, label = { Text("Clear") })
+                    FilterChip(
+                        selected = false,
+                        onClick = { selectedIndices.clear(); moveModeActive = false; copyModeActive = false },
+                        label = { Text("Clear") }
+                    )
                 }
             }
             if (tool == Tool.LINE || tool == Tool.RECTANGLE || tool == Tool.DIMENSION) {
@@ -1535,6 +2054,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 }
             }
+            if (tool == Tool.FREEHAND) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = freehandRoomMode, onClick = { freehandRoomMode = !freehandRoomMode },
+                        label = { Text("Room") }
+                    )
+                }
+            }
             calibrationRatio?.let { r ->
                 val pxPerDisplayUnit = r * displayToMm(1.0, unit)
                 Text(
@@ -1546,7 +2073,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
             Text(
                 when {
-                    tool == Tool.SELECT -> "Tap a line/circle/text/dimension to edit or delete it"
+                    tool == Tool.SELECT -> "Tap a shape to edit it, or drag an end-point grip to reshape it"
                     tool == Tool.LINE && lineStartPoint == null -> "Tap the line's start point"
                     tool == Tool.LINE -> "Tap the end point — length is automatic, or type an exact one after"
                     tool == Tool.RECTANGLE -> "Drag from one corner to the opposite corner"
@@ -1569,8 +2096,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.DISTANCE -> "Tap the second point"
                     tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
+                    tool == Tool.IMAGE && pendingImage == null -> "Pick a source — Gallery, Camera, or PDF"
+                    tool == Tool.IMAGE -> "Tap where the image goes, then type its real-world width"
+                    tool == Tool.PAN && zoomWindowArmed -> "Drag a window around the area to zoom into"
+                    tool == Tool.PAN -> "Drag to pan — or use Window/All/Previous below"
+                    tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
-                    tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release"
+                    tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
+                    tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
                     tool == Tool.BOX_SELECT -> "${selectedIndices.size} selected — Move, Copy or Delete below, or drag a new box"
                     tool == Tool.BREAK && breakLineIndex < 0 -> "Tap the line to break"
@@ -1599,11 +2132,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     .background(Color.White)
                     .border(1.dp, Color(0xFF9E9E9E))
                     .onSizeChanged { canvasSize = it }
-                    .pointerInput(tool) {
+                    // Exclude the canvas's own on-screen area from Android's edge-swipe-back
+                    // gesture, so dragging a line/rectangle to a corner near the left or right
+                    // border isn't intercepted by the system before this app ever sees it.
+                    .onGloballyPositioned { coords ->
+                        if (android.os.Build.VERSION.SDK_INT >= 29) {
+                            val b = coords.boundsInWindow()
+                            androidView.systemGestureExclusionRects = listOf(
+                                android.graphics.Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt())
+                            )
+                        }
+                    }
+                    .pointerInput(tool, zoomWindowArmed) {
                         // Two-finger pinch/pan works underneath every tool, like Ortho/Snap; the
-                        // dedicated Pan/Zoom tool additionally allows a single finger to drag it.
-                        detectPanOrZoom(requireTwoFingers = tool != Tool.PAN) { pan, zoom ->
-                            viewScale = (viewScale * zoom).coerceIn(0.5f, 6f)
+                        // dedicated Pan/Zoom tool additionally allows a single finger to drag it —
+                        // unless Zoom Window is armed, in which case a single finger instead drags
+                        // out the window rectangle (handled by the Canvas below), so this must not
+                        // also treat it as a pan.
+                        detectPanOrZoom(
+                            requireTwoFingers = tool != Tool.PAN || zoomWindowArmed,
+                            onGestureStart = { pushViewHistory() }
+                        ) { pan, zoom ->
+                            viewScale = (viewScale * zoom).coerceIn(0.02f, 6f)
                             viewOffset = clampViewOffset(viewOffset + pan, viewScale)
                         }
                     }
@@ -1619,40 +2169,94 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
+                    // The canvas below draws in its own fixed local coordinate space (the same
+                    // space shapes are stored in); the Box above it uniformly scales/pans that
+                    // whole space for display via graphicsLayer. Touches delivered to a
+                    // pointerInput nested inside that transform come through as raw, untransformed
+                    // screen coordinates rather than being converted back into local space — so
+                    // without correcting for it, every tool can only ever reach whatever was
+                    // visible at viewScale=1 / viewOffset=(0,0), no matter how far you zoom or pan
+                    // afterward.
+                    fun toContentSpace(raw: Offset): Offset =
+                        Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                    // Hand-rolled replacements for Foundation's detectTapGestures/detectDragGestures
+                    // (same call signatures, so no tool-specific logic below needed to change) that
+                    // fix a second, subtler bug on top of the content-space conversion above: the
+                    // stock detectors only ever track the FIRST pointer that went down, so releasing
+                    // a two-finger pinch-zoom one finger at a time — the normal way to end a pinch —
+                    // has that first finger's own eventual lift look, to the stock detector, exactly
+                    // like an ordinary single-finger tap/drag. That fired a tool action wherever that
+                    // finger of the *pinch* happened to be, not at the user's actual next, deliberate
+                    // tap — this is what "zoom, then tap to draw, and it draws somewhere else" was.
+                    // Fix: refuse to fire at all once a second pointer joins partway through.
+                    suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.isConsumed) return@awaitEachGesture
+                                if (!change.pressed) {
+                                    if (!multiTouch) onTap(toContentSpace(change.position))
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    suspend fun PointerInputScope.detectDragGestures(
+                        onDragStart: (Offset) -> Unit = {},
+                        onDrag: (Offset) -> Unit,
+                        onDragEnd: () -> Unit = {}
+                    ) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            var dragging = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (multiTouch || change.isConsumed) {
+                                    if (dragging) onDragEnd()
+                                    return@awaitEachGesture
+                                }
+                                if (change.positionChanged()) {
+                                    if (!dragging) { dragging = true; onDragStart(toContentSpace(change.position)) }
+                                    onDrag(toContentSpace(change.position))
+                                    change.consume()
+                                }
+                                if (!change.pressed) {
+                                    if (dragging) onDragEnd()
+                                    break
+                                }
+                            }
+                        }
+                    }
                     Canvas(
-                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, stretchArmed) {
+                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed, zoomWindowArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c = dragCurrent
                                         if (s != null && c != null) {
                                             val len = hypotF(c.x - s.x, c.y - s.y)
-                                            if (len > 12f) {
-                                                pushUndo()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len, color = currentColor?.toArgb()))
-                                            }
+                                            if (len > 12f) pendingCircle = s to len
                                         }
                                         dragStart = null; dragCurrent = null
                                     }
                                 )
                                 Tool.RECTANGLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = trySnapPoint(p); dragCurrent = dragStart },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c0 = dragCurrent
                                         if (s != null && c0 != null) {
                                             val c = trySnapPoint(c0)
-                                            if (hypotF(c.x - s.x, c.y - s.y) > 8f) {
-                                                pushUndo()
-                                                val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
-                                                val rectColor = currentColor?.toArgb()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y, color = rectColor))
-                                            }
+                                            if (hypotF(c.x - s.x, c.y - s.y) > 8f) pendingRect = s to c
                                         }
                                         dragStart = null; dragCurrent = null
                                     }
@@ -1735,15 +2339,53 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         shapes.addAll(local.map { translateShape(scaleShape(it, factor), p.x, p.y) })
                                         // One insert per pick, not one per tap — arm the picker again
                                         // (tap "Block") for another copy instead of it repeating on
-                                        // every further tap.
+                                        // every further tap. Deliberately NOT switching to Select
+                                        // here — that used to silently eat the next tap or two
+                                        // (opening the block's own edit dialog instead of whatever
+                                        // the user actually meant to draw next); staying on Block is
+                                        // a safe no-op now that pendingBlockInsert is cleared.
                                         pendingBlockInsert = null
-                                        tool = Tool.SELECT
                                     }
                                 })
-                                Tool.SELECT -> detectTapGestures(onTap = { p ->
-                                    val idx = hitTest(p)
-                                    if (idx >= 0) editingIndex = idx
+                                Tool.IMAGE -> detectTapGestures(onTap = { p ->
+                                    if (pendingImage != null) pendingImagePlacement = p
                                 })
+                                Tool.SELECT -> detectDragGestures(
+                                    onDragStart = { p ->
+                                        val grip = hitTestGrip(p)
+                                        if (grip != null) {
+                                            pushUndo()
+                                            gripDragIndex = grip.first; gripDragPart = grip.second
+                                        } else {
+                                            selectTapStart = p
+                                        }
+                                    },
+                                    onDrag = { p ->
+                                        val idx = gripDragIndex
+                                        if (idx >= 0) {
+                                            val np = trySnapPoint(p)
+                                            val s = shapes[idx]
+                                            // Reshaping an endpoint by hand invalidates any previously
+                                            // confirmed/typed real-world length, same as Trim/Extend/Break.
+                                            shapes[idx] = if (gripDragPart == 1) {
+                                                s.copy(x1 = np.x, y1 = np.y, confirmed = false, realLength = 0.0)
+                                            } else {
+                                                s.copy(x2 = np.x, y2 = np.y, confirmed = false, realLength = 0.0)
+                                            }
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (gripDragIndex < 0) {
+                                            // No grip was grabbed at drag-start: treat this as a tap on
+                                            // the shape's body, same as before grips existed.
+                                            selectTapStart?.let { p ->
+                                                val idx = hitTest(p)
+                                                if (idx >= 0) editingIndex = idx
+                                            }
+                                        }
+                                        gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
+                                    }
+                                )
                                 Tool.OFFSET -> detectTapGestures(onTap = { p ->
                                     if (offsetLineIndex < 0) {
                                         val idx = hitTestLine(p)
@@ -1776,46 +2418,76 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                     }
                                 })
-                                Tool.PAN -> {}
+                                Tool.PAN -> if (zoomWindowArmed) {
+                                    detectDragGestures(
+                                        onDragStart = { p -> zoomWinStart = p; zoomWinCurrent = p },
+                                        onDrag = { p -> zoomWinCurrent = p },
+                                        onDragEnd = {
+                                            val s = zoomWinStart; val c = zoomWinCurrent
+                                            if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
+                                                pushViewHistory()
+                                                setViewportToRect(s.x, s.y, c.x, c.y)
+                                            }
+                                            zoomWinStart = null; zoomWinCurrent = null
+                                            zoomWindowArmed = false
+                                        }
+                                    )
+                                } else {}
                                 Tool.FREEHAND -> detectDragGestures(
                                     onDragStart = { p -> freehandPoints.clear(); freehandPoints.add(p) },
-                                    onDrag = { change, _ -> freehandPoints.add(change.position) },
+                                    onDrag = { p -> freehandPoints.add(p) },
                                     onDragEnd = {
                                         if (freehandPoints.size >= 2) {
-                                            pushUndo()
-                                            shapes.add(
-                                                SketchShape(
-                                                    workId = 0, kind = ShapeKind.FREEHAND,
-                                                    path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
-                                                    color = currentColor?.toArgb()
+                                            if (freehandRoomMode) {
+                                                finishFreehandRoom(freehandPoints.toList())
+                                            } else {
+                                                pushUndo()
+                                                shapes.add(
+                                                    SketchShape(
+                                                        workId = 0, kind = ShapeKind.FREEHAND,
+                                                        path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
+                                                        color = currentColor?.toArgb()
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
                                         freehandPoints.clear()
                                     }
                                 )
-                                Tool.BOX_SELECT -> if (moveModeActive) {
-                                    // Armed by the Move action: this drag translates the whole selection.
+                                Tool.BOX_SELECT -> if (moveModeActive || copyModeActive) {
+                                    // Armed by the Move or Copy action: this drag supplies the placement —
+                                    // Move translates the selection, Copy leaves the originals and adds
+                                    // translated duplicates instead. While dragging, the nearest existing
+                                    // point (if Snap is on) is highlighted and used as the actual drop point.
                                     detectDragGestures(
-                                        onDragStart = { p -> moveDragStart = p; moveDragCurrent = p },
-                                        onDrag = { change, _ -> moveDragCurrent = change.position },
+                                        onDragStart = { p -> moveDragStart = p; moveDragCurrent = p; moveSnapTarget = null },
+                                        onDrag = { p ->
+                                            moveDragCurrent = p
+                                            moveSnapTarget = findSnapPoint(p, selectedIndices)
+                                        },
                                         onDragEnd = {
-                                            val s = moveDragStart; val c = moveDragCurrent
+                                            val s = moveDragStart; val c = moveSnapTarget ?: moveDragCurrent
                                             if (s != null && c != null) {
                                                 val dx = c.x - s.x; val dy = c.y - s.y
                                                 if (hypotF(dx, dy) > 2f) {
                                                     pushUndo()
-                                                    selectedIndices.forEach { idx -> shapes[idx] = translateShape(shapes[idx], dx, dy) }
+                                                    if (copyModeActive) {
+                                                        val copies = selectedIndices.sorted().map { translateShape(shapes[it], dx, dy) }
+                                                        selectedIndices.clear()
+                                                        copies.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+                                                    } else {
+                                                        selectedIndices.forEach { idx -> shapes[idx] = translateShape(shapes[idx], dx, dy) }
+                                                    }
                                                 }
                                             }
-                                            moveDragStart = null; moveDragCurrent = null
-                                            moveModeActive = false
+                                            moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
+                                            moveModeActive = false; copyModeActive = false
                                         }
                                     )
                                 } else {
                                     detectDragGestures(
                                         onDragStart = { p -> selectDragStart = p; selectDragCurrent = p },
-                                        onDrag = { change, _ -> selectDragCurrent = change.position },
+                                        onDrag = { p -> selectDragCurrent = p },
                                         onDragEnd = {
                                             val s = selectDragStart; val c = selectDragCurrent
                                             if (s != null && c != null) {
@@ -1878,7 +2550,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.STRETCH -> if (!stretchArmed) {
                                     detectDragGestures(
                                         onDragStart = { p -> stretchDragStart = p; stretchDragCurrent = p },
-                                        onDrag = { change, _ -> stretchDragCurrent = change.position },
+                                        onDrag = { p -> stretchDragCurrent = p },
                                         onDragEnd = {
                                             val s = stretchDragStart; val c = stretchDragCurrent
                                             if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
@@ -1928,16 +2600,32 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             hypotF(maxX - minX, maxY - minY)
                         }
                         val dimTick = (drawingExtent * 0.012f).coerceIn(6f, 18f)
-                        val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
+                        // Bumped up from the original 20..42 range — dimension text (the measured
+                        // distance shown along a Dimension) needs to stay easily readable at a
+                        // glance while working, especially outdoors on-site.
+                        val dimTextSize = (drawingExtent * 0.04f).coerceIn(30f, 60f)
+                        // Every width/radius/text-size literal below is in this canvas's own local
+                        // (content) space, which then gets uniformly scaled by viewScale for display
+                        // (see the graphicsLayer this Canvas sits inside). At a normal zoom that's fine,
+                        // but after zooming way out — e.g. clicking Fit Screen right after a line ends
+                        // up huge — a small fixed local width shrinks to sub-pixel on screen and
+                        // effectively disappears, while a freshly drawn shape still gets its correct
+                        // on-screen length/position (that part of the transform is just a translation +
+                        // uniform scale of two endpoints, always faithful). That combination makes newly
+                        // drawn geometry look like it never happened. minPx floors a size to a minimum
+                        // that stays visible on screen at any zoom level.
+                        val invViewScale = if (viewScale > 0.0001f) 1f / viewScale else 1f
+                        fun minPx(screenPx: Float) = screenPx * invViewScale
                         // A shape's own explicit colour (if the user picked one) always wins over the
                         // kind's usual default; the transient highlight (active tool selection) wins over both.
                         fun shapeColor(s: SketchShape, default: Color, isHighlighted: Boolean): Color =
                             if (isHighlighted) highlightPaint else s.color?.let { Color(it) } ?: default
                         // A shape's own explicit width (if set) always wins over the kind's usual
                         // default; highlighting still adds its usual +2px on top either way, so a
-                        // custom-width shape still reads as selected the same as any other.
+                        // custom-width shape still reads as selected the same as any other. Always at
+                        // least ~1.5 screen px so it can't vanish when zoomed far out.
                         fun strokeW(s: SketchShape, default: Float, isHighlighted: Boolean): Float {
-                            val base = if (s.strokeWidth > 0f) s.strokeWidth else default
+                            val base = maxOf(if (s.strokeWidth > 0f) s.strokeWidth else default, minPx(1.5f))
                             return if (isHighlighted) base + 2f else base
                         }
                         shapes.forEachIndexed { i, s ->
@@ -1960,7 +2648,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     s.label, s.x1, s.y1,
                                     android.graphics.Paint().apply {
                                         color = if (isHighlighted) 0xFFE65100.toInt() else (s.color ?: 0xFF6A1B9A.toInt())
-                                        textSize = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f
+                                        textSize = maxOf(
+                                            if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f,
+                                            minPx(10f)
+                                        )
                                     }
                                 )
                                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
@@ -1980,10 +2671,39 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                     )
                                 }
+                                ShapeKind.IMAGE -> {
+                                    val topLeft = Offset(minOf(s.x1, s.x2), minOf(s.y1, s.y2))
+                                    val size = androidx.compose.ui.geometry.Size(abs(s.x2 - s.x1), abs(s.y2 - s.y1))
+                                    val bmp = imageBitmapCache[s.path]
+                                    if (bmp != null) {
+                                        drawImage(
+                                            bmp,
+                                            dstOffset = androidx.compose.ui.unit.IntOffset(topLeft.x.toInt(), topLeft.y.toInt()),
+                                            dstSize = androidx.compose.ui.unit.IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1))
+                                        )
+                                    } else {
+                                        // Still decoding — a placeholder box so the reserved area is visible.
+                                        drawRect(Color.LightGray.copy(alpha = 0.4f), topLeft = topLeft, size = size)
+                                    }
+                                    if (isHighlighted) {
+                                        drawRect(
+                                            highlightPaint, topLeft = topLeft, size = size,
+                                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                        )
+                                    }
+                                }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
-                                    val p1 = Offset(s.x1, s.y1); val p2 = Offset(s.x2, s.y2)
                                     val dimW = strokeW(s, 3f, isHighlighted)
+                                    val base1 = Offset(s.x1, s.y1); val base2 = Offset(s.x2, s.y2)
+                                    val (p1, p2) = dimLineEndpoints(s)
+                                    // Extension (witness) lines from the actual measured points out to
+                                    // the offset dimension line — only when there's an offset to show.
+                                    if (s.dimOffset != 0f) {
+                                        val extW = minPx(1.5f)
+                                        drawLine(dimColor, base1, p1, strokeWidth = extW)
+                                        drawLine(dimColor, base2, p2, strokeWidth = extW)
+                                    }
                                     drawLine(dimColor, p1, p2, strokeWidth = dimW)
                                     // small perpendicular ticks at each end, like a dimension line
                                     val dx = p2.x - p1.x; val dy = p2.y - p1.y
@@ -1995,9 +2715,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     }
                                     if (s.label.isNotBlank()) {
                                         val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
+                                        val effTextSize = maxOf(
+                                            if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else dimTextSize,
+                                            minPx(14f)
+                                        )
                                         drawContext.canvas.nativeCanvas.drawText(
                                             s.label, mx + 4f, my - 6f,
-                                            android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = dimTextSize }
+                                            android.graphics.Paint().apply { color = dimColor.toArgb(); textSize = effTextSize }
                                         )
                                     }
                                 }
@@ -2005,65 +2729,97 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                         val s = dragStart; val c = dragCurrent
                         if (s != null && c != null) {
+                            val previewW = minPx(4f)
                             if (tool == Tool.CIRCLE) {
-                                drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+                                drawCircle(Color.Gray, radius = hypotF(c.x - s.x, c.y - s.y), center = s, style = androidx.compose.ui.graphics.drawscope.Stroke(width = previewW))
                             } else if (tool == Tool.RECTANGLE) {
                                 val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
                                 val gray = Color.Gray
-                                drawLine(gray, s, p2, strokeWidth = 4f); drawLine(gray, p2, c, strokeWidth = 4f)
-                                drawLine(gray, c, p4, strokeWidth = 4f); drawLine(gray, p4, s, strokeWidth = 4f)
+                                drawLine(gray, s, p2, strokeWidth = previewW); drawLine(gray, p2, c, strokeWidth = previewW)
+                                drawLine(gray, c, p4, strokeWidth = previewW); drawLine(gray, p4, s, strokeWidth = previewW)
                             }
                         }
                         lineStartPoint?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         dimStartPoint?.let { p ->
-                            drawCircle(Color(0xFF6A1B9A), radius = 8f, center = p)
+                            drawCircle(Color(0xFF6A1B9A), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         breakPoint1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         filletTap1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         filletTap2?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         stretchBasePoint?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         arcP1?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         arcP2?.let { p ->
-                            drawCircle(Color(0xFFE65100), radius = 8f, center = p)
+                            drawCircle(Color(0xFFE65100), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         distanceStart?.let { p ->
-                            drawCircle(Color(0xFF1565C0), radius = 8f, center = p)
+                            drawCircle(Color(0xFF1565C0), radius = maxOf(8f, minPx(4f)), center = p)
                         }
                         if (tool == Tool.FREEHAND && freehandPoints.size >= 2) {
-                            freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
+                            val freehandPreviewW = minPx(4f)
+                            freehandPoints.zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = freehandPreviewW) }
+                        }
+                        if (tool == Tool.SELECT) {
+                            // AutoCAD-style grips: every LINE/DIMENSION endpoint is a small draggable
+                            // handle — drag one to reshape just that end instead of moving the whole
+                            // shape. The one currently being dragged is drawn larger and filled.
+                            val gripHalf = maxOf(6f, minPx(4f))
+                            shapes.forEachIndexed { i, s ->
+                                if (s.kind == ShapeKind.LINE || s.kind == ShapeKind.DIMENSION) {
+                                    listOf(1 to Offset(s.x1, s.y1), 2 to Offset(s.x2, s.y2)).forEach { (part, pt) ->
+                                        val active = gripDragIndex == i && gripDragPart == part
+                                        val half = if (active) gripHalf * 1.33f else gripHalf
+                                        drawRect(
+                                            Color(0xFF1565C0),
+                                            topLeft = Offset(pt.x - half, pt.y - half),
+                                            size = androidx.compose.ui.geometry.Size(half * 2f, half * 2f),
+                                            style = if (active) androidx.compose.ui.graphics.drawscope.Fill
+                                            else androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(1.5f))
+                                        )
+                                    }
+                                }
+                            }
                         }
                         if (tool == Tool.BOX_SELECT) {
-                            if (moveModeActive) {
-                                val s2 = moveDragStart; val c2 = moveDragCurrent
+                            if (moveModeActive || copyModeActive) {
+                                val s2 = moveDragStart; val c2 = moveSnapTarget ?: moveDragCurrent
                                 if (s2 != null && c2 != null) {
                                     val dx = c2.x - s2.x; val dy = c2.y - s2.y
+                                    val ghostColor = if (copyModeActive) Color(0xFF2E7D32) else Color.Gray
+                                    val ghostW = minPx(4f)
                                     selectedIndices.forEach { idx ->
                                         val sh = translateShape(shapes[idx], dx, dy)
                                         when (sh.kind) {
                                             ShapeKind.CIRCLE -> drawCircle(
-                                                Color.Gray, radius = sh.r, center = Offset(sh.cx, sh.cy),
-                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
+                                                ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy),
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW)
                                             )
                                             ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(sh.path).zipWithNext { a, b ->
-                                                drawLine(Color.Gray, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = 4f)
+                                                drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                             }
-                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(Color.Gray, a, b, strokeWidth = 4f) }
-                                            ShapeKind.TEXT -> drawCircle(Color.Gray, radius = 6f, center = Offset(sh.x1, sh.y1))
-                                            else -> drawLine(Color.Gray, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = 4f)
+                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                            ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
+                                            else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
                                         }
                                     }
+                                }
+                                // Highlights the existing point a Snap-assisted Move/Copy drag would land on.
+                                moveSnapTarget?.let { p ->
+                                    drawCircle(
+                                        Color(0xFFE65100), radius = maxOf(11f, minPx(5f)), center = p,
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                    )
                                 }
                             } else {
                                 val s2 = selectDragStart; val c2 = selectDragCurrent
@@ -2077,7 +2833,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     drawRect(
                                         boxColor, topLeft = topLeft, size = boxSize,
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                            width = 2f,
+                                            width = minPx(2f),
                                             pathEffect = if (isWindow) null else androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
                                         )
                                     )
@@ -2095,7 +2851,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 drawRect(
                                     stretchColor, topLeft = topLeft, size = boxSize,
                                     style = androidx.compose.ui.graphics.drawscope.Stroke(
-                                        width = 2f, pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
+                                        width = minPx(2f), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
                                     )
                                 )
                             }
@@ -2106,7 +2862,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     sp.part == 0 -> Offset(s.x1, s.y1)
                                     else -> Offset(s.x2, s.y2)
                                 }
-                                drawCircle(Color(0xFFE65100), radius = 7f, center = p)
+                                drawCircle(Color(0xFFE65100), radius = maxOf(7f, minPx(4f)), center = p)
+                            }
+                        }
+                        if (zoomWindowArmed) {
+                            val s2 = zoomWinStart; val c2 = zoomWinCurrent
+                            if (s2 != null && c2 != null) {
+                                val topLeft = Offset(minOf(s2.x, c2.x), minOf(s2.y, c2.y))
+                                val boxSize = androidx.compose.ui.geometry.Size(abs(c2.x - s2.x), abs(c2.y - s2.y))
+                                val zoomColor = Color(0xFF1565C0)
+                                drawRect(zoomColor.copy(alpha = 0.1f), topLeft = topLeft, size = boxSize)
+                                drawRect(
+                                    zoomColor, topLeft = topLeft, size = boxSize,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                )
                             }
                         }
                     }
@@ -2117,6 +2886,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
                             .background(Color.White.copy(alpha = 0.85f), CircleShape)
                     ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
+                    // Fullscreen mode has no top app bar, so the recalibrate escape hatch needs
+                    // its own always-visible button here too — same fix as the top bar's, just
+                    // reachable without leaving fullscreen first.
+                    IconButton(
+                        onClick = { recalibrateView() },
+                        modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                            .background(Color.White.copy(alpha = 0.85f), CircleShape)
+                    ) { Icon(Icons.Filled.Refresh, "Recalibrate screen") }
                 }
             }
 
@@ -2136,11 +2913,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         value = commandInput,
                         onValueChange = { commandInput = it; commandFeedback = null },
                         singleLine = true,
-                        label = { Text("Command") },
+                        textStyle = MaterialTheme.typography.bodyMedium,
                         placeholder = { Text("L, C, FILLET, 'ORTHO …") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
                         keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).height(52.dp)
                     )
                     TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
                 }
@@ -2148,6 +2925,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
                 }
             }
+            Spacer(Modifier.height(16.dp))
 
             }
         }
@@ -2160,9 +2938,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
  * Nothing is created until Confirm — Cancel just discards the two picked points.
  */
 @Composable
-private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
+private fun DimensionTextDialog(
+    initialText: String,
+    initialOffsetPx: Float = 30f,
+    unitLabel: String = "mm",
+    onConfirm: (text: String, fontSizeMm: Float, offsetPx: Float) -> Unit,
+    onCancel: () -> Unit
+) {
     var text by remember { mutableStateOf(initialText) }
     var showHandwrite by remember { mutableStateOf(false) }
+    var fontSizeText by remember { mutableStateOf("") }
+    var offsetText by remember { mutableStateOf(trimNum(initialOffsetPx.toDouble())) }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
@@ -2173,9 +2959,29 @@ private fun DimensionTextDialog(initialText: String, onConfirm: (String) -> Unit
             Column {
                 OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
+                OutlinedTextField(
+                    value = fontSizeText, onValueChange = { fontSizeText = it }, singleLine = true,
+                    label = { Text("Text size ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                OutlinedTextField(
+                    value = offsetText, onValueChange = { offsetText = it }, singleLine = true,
+                    label = { Text("Offset from object (px) — 0 draws on the object") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
             }
         },
-        confirmButton = { TextButton(onClick = { if (text.isNotBlank()) onConfirm(text) }) { Text("Add") } },
+        confirmButton = {
+            TextButton(onClick = {
+                if (text.isNotBlank()) {
+                    val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
+                    val offsetPx = offsetText.toFloatOrNull() ?: initialOffsetPx
+                    onConfirm(text, fontSizeMm, offsetPx)
+                }
+            }) { Text("Add") }
+        },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
 }
@@ -2381,6 +3187,114 @@ private fun LineFinishDialog(
     )
 }
 
+/** Both points are already dragged out; this asks for the rectangle's exact length/height (each
+ *  independently optional), pre-filled with what was actually dragged. Nothing is placed until
+ *  Apply/Use as tapped — Cancel just discards the drag. */
+@Composable
+private fun RectangleFinishDialog(
+    asLengthDisplay: Float,
+    asHeightDisplay: Float,
+    unitLabel: String,
+    onApply: (length: Double?, height: Double?) -> Unit,
+    onUseAsIs: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var lengthText by remember { mutableStateOf("") }
+    var heightText by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onUseAsIs,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Rectangle size", modifier = Modifier.weight(1f))
+                IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel — remove") }
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "As dragged: ~${trimNum(asLengthDisplay.toDouble())} × ${trimNum(asHeightDisplay.toDouble())}$unitLabel. " +
+                        "Type exact values to override either side, or use it as dragged.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = lengthText, onValueChange = { lengthText = it; error = null }, singleLine = true,
+                    label = { Text("Exact length ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                OutlinedTextField(
+                    value = heightText, onValueChange = { heightText = it; error = null }, singleLine = true,
+                    label = { Text("Exact height ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val length = if (lengthText.isBlank()) null else lengthText.toDoubleOrNull()
+                val height = if (heightText.isBlank()) null else heightText.toDoubleOrNull()
+                when {
+                    lengthText.isNotBlank() && length == null -> error = "Enter a valid length"
+                    heightText.isNotBlank() && height == null -> error = "Enter a valid height"
+                    length == null && height == null -> onUseAsIs()
+                    else -> onApply(length, height)
+                }
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as dragged") } }
+    )
+}
+
+/** The centre and edge are already dragged out; this asks for the circle's exact radius, pre-filled
+ *  with what was actually dragged. Nothing is placed until Apply/Use as tapped — Cancel just
+ *  discards the drag. */
+@Composable
+private fun CircleFinishDialog(
+    asTappedDisplay: Float,
+    unitLabel: String,
+    onApply: (value: Double) -> Unit,
+    onUseAsIs: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onUseAsIs,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Circle radius", modifier = Modifier.weight(1f))
+                IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel — remove") }
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    "As dragged: ~${trimNum(asTappedDisplay.toDouble())}$unitLabel radius. Type an exact value to override, or use it as dragged.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Exact radius ($unitLabel) — optional") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (text.isBlank()) { onUseAsIs(); return@TextButton }
+                val value = text.toDoubleOrNull()
+                if (value == null) error = "Enter a valid radius" else onApply(value)
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onUseAsIs) { Text("Use as dragged") } }
+    )
+}
+
 /** Asked from Box Select's "Width" action: applies one line width (px) to every selected shape
  *  at once, instead of having to open each one's own edit dialog individually. */
 @Composable
@@ -2556,6 +3470,106 @@ private fun BlockPickerDialog(
     )
 }
 
+/** Asked from the Image tool: where the reference image (photo/camera/PDF page) should come from. */
+@Composable
+private fun ImageSourceDialog(onGallery: () -> Unit, onCamera: () -> Unit, onPdf: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Insert image") },
+        text = {
+            Column {
+                Text(
+                    "Pick a source, then tap where it goes on the drawing and type its real-world width.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                TextButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Gallery") }
+                TextButton(onClick = onCamera, modifier = Modifier.fillMaxWidth()) { Text("Camera") }
+                TextButton(onClick = onPdf, modifier = Modifier.fillMaxWidth()) { Text("PDF") }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/** Asked right after tapping where a picked image should go: its real-world width — height follows
+ *  the source image's own aspect ratio automatically. */
+@Composable
+private fun ImageWidthDialog(unitLabel: String, onConfirm: (width: Double) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Image width") },
+        text = {
+            Column {
+                Text(
+                    "Type the real-world width this image should span — height follows its own proportions.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Width ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v == null || v <= 0.0) error = "Enter a valid width" else onConfirm(v)
+            }) { Text("Insert") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** Shown once a hand-drawn Room-mode stroke has been straightened into wall segments: asks for the
+ *  real length of whichever segment looked most like "the top wall" (see [SketchEditorScreen]'s
+ *  finishFreehandRoom), then applies it as a Set Scale-style calibration reference — same geometry,
+ *  just marked confirmed with that real length — before the view refits to the whole sketch. */
+@Composable
+private fun RoomCalibrateDialog(
+    asTappedDisplay: Float,
+    unitLabel: String,
+    onConfirm: (realValue: Double) -> Unit,
+    onSkip: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onSkip,
+        title = { Text("Top wall length") },
+        text = {
+            Column {
+                Text(
+                    "Your sketch is now straight walls. As drawn, the top (or most level) one reads " +
+                        "~${trimNum(asTappedDisplay.toDouble())}$unitLabel — type its actual length to scale the " +
+                        "whole sketch to match, or skip to keep it as drawn.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Actual length ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v == null || v <= 0.0) error = "Enter a valid length" else onConfirm(v)
+            }) { Text("Set scale") }
+        },
+        dismissButton = { TextButton(onClick = onSkip) { Text("Skip") } }
+    )
+}
+
 /** Shown after the Distance tool's 2 taps: reports the on-screen pixel gap and asks for the real
  *  distance those two points actually represent (e.g. a dimension already written on a traced
  *  background photo) — confirming stores the ratio between the two as the calibration scale. */
@@ -2652,6 +3666,21 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 }
             )
         }
+        ShapeKind.IMAGE -> {
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Inserted image") },
+                text = {
+                    Text(
+                        "Use Select's box tool to Move or Copy it. Delete removes just this " +
+                            "image, not the rest of the drawing.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                    )
+                },
+                confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+                dismissButton = { TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) } }
+            )
+        }
         else -> {
             LabelInputDialog(
                 title = when (shape.kind) {
@@ -2662,17 +3691,21 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                 initial = shape.label,
                 initialColor = shape.color?.let { Color(it) },
                 showColorPicker = true,
-                showFontSize = shape.kind == ShapeKind.TEXT,
+                showFontSize = shape.kind == ShapeKind.TEXT || shape.kind == ShapeKind.DIMENSION,
                 initialFontSizeMm = shape.fontSize,
                 showStrokeWidth = shape.kind != ShapeKind.TEXT,
                 initialStrokeWidthPx = shape.strokeWidth,
+                showDimOffset = shape.kind == ShapeKind.DIMENSION,
+                initialDimOffsetPx = shape.dimOffset,
                 unitLabel = unitLabel,
-                onConfirm = { text, color, fontSizeMm, strokeWidthPx ->
+                onConfirm = { text, color, fontSizeMm, strokeWidthPx, dimOffsetPx ->
+                    val usesFontSize = shape.kind == ShapeKind.TEXT || shape.kind == ShapeKind.DIMENSION
                     onConfirm(
                         shape.copy(
                             label = text, color = color?.toArgb(),
-                            fontSize = if (shape.kind == ShapeKind.TEXT) fontSizeMm else shape.fontSize,
-                            strokeWidth = if (shape.kind != ShapeKind.TEXT) strokeWidthPx else shape.strokeWidth
+                            fontSize = if (usesFontSize) fontSizeMm else shape.fontSize,
+                            strokeWidth = if (shape.kind != ShapeKind.TEXT) strokeWidthPx else shape.strokeWidth,
+                            dimOffset = if (shape.kind == ShapeKind.DIMENSION) dimOffsetPx else shape.dimOffset
                         )
                     )
                 },
@@ -2794,8 +3827,10 @@ private fun LabelInputDialog(
     initialFontSizeMm: Float = 0f,
     showStrokeWidth: Boolean = false,
     initialStrokeWidthPx: Float = 0f,
+    showDimOffset: Boolean = false,
+    initialDimOffsetPx: Float = 0f,
     unitLabel: String = "mm",
-    onConfirm: (text: String, color: Color?, fontSizeMm: Float, strokeWidthPx: Float) -> Unit,
+    onConfirm: (text: String, color: Color?, fontSizeMm: Float, strokeWidthPx: Float, dimOffsetPx: Float) -> Unit,
     onDelete: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -2808,6 +3843,7 @@ private fun LabelInputDialog(
     var widthText by remember {
         mutableStateOf(if (initialStrokeWidthPx > 0f) trimNum(initialStrokeWidthPx.toDouble()) else "")
     }
+    var dimOffsetText by remember { mutableStateOf(trimNum(initialDimOffsetPx.toDouble())) }
     if (showHandwrite) {
         HandwriteInputDialog(onResult = { text = it; showHandwrite = false }, onDismiss = { showHandwrite = false })
     }
@@ -2837,13 +3873,22 @@ private fun LabelInputDialog(
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                 }
+                if (showDimOffset) {
+                    OutlinedTextField(
+                        value = dimOffsetText, onValueChange = { dimOffsetText = it }, singleLine = true,
+                        label = { Text("Offset from object (px) — 0 draws on the object; negative flips the side") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
                 val fontSizeMm = fontSizeText.toDoubleOrNull()?.takeIf { it > 0.0 }?.let { displayToMm(it, unitLabel).toFloat() } ?: 0f
                 val strokeWidthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
-                onConfirm(text, pickedColor, fontSizeMm, strokeWidthPx)
+                val dimOffsetPx = dimOffsetText.toFloatOrNull() ?: initialDimOffsetPx
+                onConfirm(text, pickedColor, fontSizeMm, strokeWidthPx, dimOffsetPx)
             }) { Text("Save") }
         },
         dismissButton = {
@@ -2873,6 +3918,27 @@ private fun distToSegment(p: Offset, a: Offset, b: Offset): Float {
     t = t.coerceIn(0f, 1f)
     val projX = a.x + t * dx; val projY = a.y + t * dy
     return hypotF(p.x - projX, p.y - projY)
+}
+
+/** Ramer/Douglas-Peucker line simplification: keeps only the points that matter to the stroke's
+ *  actual shape — any point within [epsilon] of the straight line between its neighbours on either
+ *  side is dropped, so shaky hand-drawn segments collapse to one straight line while real corners
+ *  (which deviate by more than [epsilon]) survive. Used by Box Select's "Smooth" action. */
+private fun douglasPeucker(points: List<Offset>, epsilon: Float): List<Offset> {
+    if (points.size < 3) return points
+    val first = points.first(); val last = points.last()
+    var maxDist = 0f; var index = 0
+    for (i in 1 until points.size - 1) {
+        val d = distToSegment(points[i], first, last)
+        if (d > maxDist) { maxDist = d; index = i }
+    }
+    return if (maxDist > epsilon) {
+        val left = douglasPeucker(points.subList(0, index + 1), epsilon)
+        val right = douglasPeucker(points.subList(index, points.size), epsilon)
+        left.dropLast(1) + right
+    } else {
+        listOf(first, last)
+    }
 }
 
 // Every SketchShape.realLength (and every pixel-derived distance) is always stored/computed in

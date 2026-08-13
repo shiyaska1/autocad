@@ -102,7 +102,7 @@ fun DxfHomeScreen(onBack: () -> Unit, onGoToEditor: () -> Unit, onBlankCanvas: (
                 // first page is rasterized for that (the original PDF stays a source attachment).
                 val first = picked.first()
                 val bitmap: Bitmap? = if (first.isPdf) {
-                    PdfPageRenderer.renderPages(context, first.uri, targetWidth = 1600).firstOrNull()
+                    PdfPageRenderer.renderPages(context, first.uri).firstOrNull()
                 } else {
                     sources.firstOrNull { !it.mime.contains("pdf") }?.let { BitmapUtil.decodeOriented(it.path) }
                 }
