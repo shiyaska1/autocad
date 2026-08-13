@@ -1,5 +1,6 @@
 package com.sketchdxf.app.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -67,6 +68,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -104,13 +106,18 @@ import com.sketchdxf.app.data.SketchCircleFit
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
+import com.sketchdxf.app.dxf.BitmapUtil
 import com.sketchdxf.app.dxf.DxfReader
 import com.sketchdxf.app.dxf.DxfWriter
+import com.sketchdxf.app.dxf.PdfPageRenderer
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.PreviewRenderer
 import com.sketchdxf.app.dxf.SketchAttachmentStore
+import com.sketchdxf.app.ocr.rememberImageCamera
 import com.sketchdxf.app.ui.common.HandwriteInputDialog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.atan2
@@ -167,7 +174,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK, IMAGE }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -399,6 +406,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
 
+    // Insert Image: pick from Gallery/Camera/PDF, tap where it goes, then type its real-world
+    // width — height follows the source image's own aspect ratio. pendingImage holds the copied
+    // file's path plus its native pixel size (for that aspect ratio); pendingImagePlacement holds
+    // the tapped drop point while the width dialog is open.
+    var showImageSourceDialog by remember { mutableStateOf(false) }
+    var pendingImage by remember { mutableStateOf<Triple<String, Int, Int>?>(null) }
+    var pendingImagePlacement by remember { mutableStateOf<Offset?>(null) }
+    val imageBitmapCache = remember { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
+
     // Stretch: drag a crossing box — only the endpoints inside it are captured (a fully-enclosed
     // shape moves as a whole; a shape with just one end inside gets genuinely stretched). Then tap
     // a base point and a second point for the direction; an exact distance can override afterward.
@@ -413,6 +429,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun resetToolState() {
         lineStartPoint = null
         pendingRect = null; pendingCircle = null; pendingRoomCalibrate = null
+        pendingImage = null; pendingImagePlacement = null
         zoomWindowArmed = false; zoomWinStart = null; zoomWinCurrent = null
         offsetLineIndex = -1
         trimBoundaryIndex = -1; trimTargetIndex = -1
@@ -550,6 +567,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         .minOrNull() ?: Float.MAX_VALUE
                 }
                 ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
+                ShapeKind.IMAGE -> distToRect(
+                    p, androidx.compose.ui.geometry.Rect(minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2))
+                )
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
@@ -1524,6 +1544,37 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             pendingRoomCalibrate = null
         }
     }
+    if (showImageSourceDialog) {
+        ImageSourceDialog(
+            onGallery = { imageGalleryPicker.launch("image/*") },
+            onCamera = { showImageSourceDialog = false; launchImageCamera() },
+            onPdf = { imagePdfPicker.launch(arrayOf("application/pdf")) },
+            onDismiss = { showImageSourceDialog = false }
+        )
+    }
+    pendingImagePlacement?.let { p ->
+        val img = pendingImage
+        if (img == null) {
+            pendingImagePlacement = null
+        } else {
+            val (path, nativeW, nativeH) = img
+            ImageWidthDialog(
+                unitLabel = unit,
+                onConfirm = { widthValue ->
+                    pushUndo()
+                    val wPx = displayToMm(widthValue, unit).toFloat() * currentPxPerMm()
+                    val hPx = wPx * nativeH / nativeW.coerceAtLeast(1)
+                    shapes.add(SketchShape(workId = 0, kind = ShapeKind.IMAGE, x1 = p.x, y1 = p.y, x2 = p.x + wPx, y2 = p.y + hPx, path = path))
+                    pendingImage = null
+                    pendingImagePlacement = null
+                    tool = Tool.SELECT
+                },
+                onCancel = {
+                    pendingImagePlacement = null
+                }
+            )
+        }
+    }
     pendingDistancePx?.let { px ->
         DistanceCalibrationDialog(
             measuredPx = px,
@@ -1634,6 +1685,50 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     val dxfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importDxf(uri)
+    }
+
+    /** Saves [bmp] as a permanent attachment and arms it for placement — the next tap on the
+     *  canvas (Tool.IMAGE) sets [pendingImagePlacement], which then asks for a real-world width. */
+    fun insertImageFromBitmap(bmp: Bitmap) {
+        val target = SketchAttachmentStore.newFile(context, "insert", "png")
+        val saved = runCatching {
+            java.io.FileOutputStream(target).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }.isSuccess
+        if (saved) {
+            pendingImage = Triple(target.absolutePath, bmp.width, bmp.height)
+            tool = Tool.IMAGE
+            showImageSourceDialog = false
+        }
+    }
+
+    val imageGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            val copied = SketchAttachmentStore.copyIn(context, uri)
+            val bmp = copied?.let { BitmapUtil.decodeOriented(it.path) }
+            copied?.let { SketchAttachmentStore.delete(it.path) }
+            if (bmp != null) insertImageFromBitmap(bmp)
+        }
+    }
+    val imagePdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) PdfPageRenderer.renderPages(context, uri).firstOrNull()?.let { insertImageFromBitmap(it) }
+    }
+    val launchImageCamera = rememberImageCamera(onImage = { uri ->
+        val copied = SketchAttachmentStore.copyIn(context, uri)
+        val bmp = copied?.let { BitmapUtil.decodeOriented(it.path) }
+        copied?.let { SketchAttachmentStore.delete(it.path) }
+        if (bmp != null) insertImageFromBitmap(bmp)
+    })
+
+    // Decodes each inserted image's file once (off the main thread) into imageBitmapCache, keyed
+    // by path, for the Canvas draw loop below to just look up and blit — re-checks whenever the
+    // number of IMAGE shapes changes (new insert, undo, delete).
+    val imageShapeCount = shapes.count { it.kind == ShapeKind.IMAGE }
+    LaunchedEffect(imageShapeCount) {
+        val paths = shapes.filter { it.kind == ShapeKind.IMAGE }.map { it.path }.distinct()
+        paths.filter { it !in imageBitmapCache }.forEach { path ->
+            val bmp = withContext(Dispatchers.IO) { BitmapUtil.decodeOriented(path, maxDim = 1600) }
+            if (bmp != null) imageBitmapCache[path] = bmp.asImageBitmap()
+        }
     }
 
     fun runCommand(raw: String) {
@@ -1778,6 +1873,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
                 FilterChip(selected = tool == Tool.BLOCK, onClick = { showBlockPicker = true },
                     label = { Text("Block") })
+                FilterChip(selected = tool == Tool.IMAGE, onClick = { showImageSourceDialog = true },
+                    label = { Text("Image") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {
@@ -1922,6 +2019,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.DISTANCE -> "Tap the second point"
                     tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
+                    tool == Tool.IMAGE && pendingImage == null -> "Pick a source — Gallery, Camera, or PDF"
+                    tool == Tool.IMAGE -> "Tap where the image goes, then type its real-world width"
                     tool == Tool.PAN && zoomWindowArmed -> "Drag a window around the area to zoom into"
                     tool == Tool.PAN -> "Drag to pan — or use Window/All/Previous below"
                     tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
@@ -2129,6 +2228,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         pendingBlockInsert = null
                                         tool = Tool.SELECT
                                     }
+                                })
+                                Tool.IMAGE -> detectTapGestures(onTap = { p ->
+                                    if (pendingImage != null) pendingImagePlacement = p
                                 })
                                 Tool.SELECT -> detectDragGestures(
                                     onDragStart = { p ->
@@ -2450,6 +2552,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         size = androidx.compose.ui.geometry.Size(s.r * 2f, s.r * 2f),
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                     )
+                                }
+                                ShapeKind.IMAGE -> {
+                                    val topLeft = Offset(minOf(s.x1, s.x2), minOf(s.y1, s.y2))
+                                    val size = androidx.compose.ui.geometry.Size(abs(s.x2 - s.x1), abs(s.y2 - s.y1))
+                                    val bmp = imageBitmapCache[s.path]
+                                    if (bmp != null) {
+                                        drawImage(
+                                            bmp,
+                                            dstOffset = androidx.compose.ui.unit.IntOffset(topLeft.x.toInt(), topLeft.y.toInt()),
+                                            dstSize = androidx.compose.ui.unit.IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1))
+                                        )
+                                    } else {
+                                        // Still decoding — a placeholder box so the reserved area is visible.
+                                        drawRect(Color.LightGray.copy(alpha = 0.4f), topLeft = topLeft, size = size)
+                                    }
+                                    if (isHighlighted) {
+                                        drawRect(
+                                            highlightPaint, topLeft = topLeft, size = size,
+                                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                        )
+                                    }
                                 }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
@@ -3236,6 +3359,63 @@ private fun BlockPickerDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
+/** Asked from the Image tool: where the reference image (photo/camera/PDF page) should come from. */
+@Composable
+private fun ImageSourceDialog(onGallery: () -> Unit, onCamera: () -> Unit, onPdf: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Insert image") },
+        text = {
+            Column {
+                Text(
+                    "Pick a source, then tap where it goes on the drawing and type its real-world width.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                TextButton(onClick = onGallery, modifier = Modifier.fillMaxWidth()) { Text("Gallery") }
+                TextButton(onClick = onCamera, modifier = Modifier.fillMaxWidth()) { Text("Camera") }
+                TextButton(onClick = onPdf, modifier = Modifier.fillMaxWidth()) { Text("PDF") }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/** Asked right after tapping where a picked image should go: its real-world width — height follows
+ *  the source image's own aspect ratio automatically. */
+@Composable
+private fun ImageWidthDialog(unitLabel: String, onConfirm: (width: Double) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Image width") },
+        text = {
+            Column {
+                Text(
+                    "Type the real-world width this image should span — height follows its own proportions.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Width ($unitLabel)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toDoubleOrNull()
+                if (v == null || v <= 0.0) error = "Enter a valid width" else onConfirm(v)
+            }) { Text("Insert") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
 }
 

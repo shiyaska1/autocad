@@ -101,6 +101,11 @@ object ShapeKind {
      *  one true LWPOLYLINE entity instead of a chain of separate LINE segments — see
      *  SketchEditorScreen's "Convert to Polyline" action and [SketchCircleFit]. */
     const val POLYLINE = "POLYLINE"
+    /** An inserted reference image (photo, camera capture, or a rasterized PDF page), placed and
+     *  scaled to a real-world size mid-drawing — bounding box x1,y1 (top-left) to x2,y2
+     *  (bottom-right), with [SketchShape.path] holding the copied image file's path. Editor-only:
+     *  not part of DXF export, same as the work's own background image. */
+    const val IMAGE = "IMAGE"
 }
 
 /**
