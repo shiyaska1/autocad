@@ -1,6 +1,7 @@
 package com.sketchdxf.app
 
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
@@ -13,6 +14,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import androidx.navigation.compose.rememberNavController
+import com.sketchdxf.app.ui.BackupScreen
+import com.sketchdxf.app.ui.BlockLibraryScreen
 import com.sketchdxf.app.ui.BootScreen
 import com.sketchdxf.app.ui.DxfDetailScreen
 import com.sketchdxf.app.ui.DxfHomeScreen
@@ -23,6 +26,10 @@ import com.sketchdxf.app.ui.SketchEditorScreen
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Sketching/tracing has long stretches with no touch input while you look at the plan —
+        // keep the screen from locking for as long as the app is open (normal lock/sleep behaviour
+        // resumes the moment you leave it).
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
@@ -51,8 +58,16 @@ private fun SketchDxfApp() {
             DxfListScreen(
                 onBack = { },
                 onNew = { nav.navigate("new") },
-                onOpen = { id -> nav.navigate("detail/$id") }
+                onOpen = { id -> nav.navigate("detail/$id") },
+                onBlocks = { nav.navigate("blocks") },
+                onBackup = { nav.navigate("backup") }
             )
+        }
+        composable("blocks") {
+            BlockLibraryScreen(onBack = { nav.popBackStack() })
+        }
+        composable("backup") {
+            BackupScreen(onBack = { nav.popBackStack() })
         }
         composable("new") {
             DxfHomeScreen(

@@ -8,8 +8,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.migration.Migration
 
 @Database(
-    entities = [SketchWork::class, SketchSource::class, SketchShape::class],
-    version = 5,
+    entities = [SketchWork::class, SketchSource::class, SketchShape::class, SketchBlock::class],
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -41,18 +41,55 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE sketch_shapes ADD COLUMN major INTEGER NOT NULL DEFAULT 0")
             }
         }
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `sketch_blocks` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`category` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`shapesData` TEXT NOT NULL, " +
+                        "`pxPerMm` REAL NOT NULL)"
+                )
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sketch_shapes ADD COLUMN fontSize REAL NOT NULL DEFAULT 0")
+            }
+        }
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sketch_shapes ADD COLUMN strokeWidth REAL NOT NULL DEFAULT 0")
+            }
+        }
+
+        const val DB_FILE_NAME = "sketch_dxf.db"
 
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "sketch_dxf.db"
+                    DB_FILE_NAME
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }
+
+        /** Closes the open connection (checkpointing its WAL file) and drops the cached instance,
+         *  so the underlying .db file on disk is safe to read or overwrite — used by
+         *  [com.sketchdxf.app.data.BackupManager] around an export/import. [get] transparently
+         *  reopens a fresh connection the next time anything touches the database. */
+        fun closeAndReset() {
+            synchronized(this) {
+                INSTANCE?.close()
+                INSTANCE = null
+            }
+        }
     }
 }

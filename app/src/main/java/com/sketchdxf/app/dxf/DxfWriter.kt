@@ -73,7 +73,10 @@ object DxfWriter {
                     listOf(Entity.Line(x1, y1, x2, y2, s.color))
                 }
                 ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale, s.color))
-                ShapeKind.TEXT -> if (s.label.isNotBlank()) listOf(Entity.Text(sx(s.x1), sy(s.y1), 3.0, s.label, s.color)) else emptyList()
+                ShapeKind.TEXT -> if (s.label.isNotBlank()) {
+                    val height = if (s.fontSize > 0f) s.fontSize.toDouble() else 3.0
+                    listOf(Entity.Text(sx(s.x1), sy(s.y1), height, s.label, s.color))
+                } else emptyList()
                 ShapeKind.DIMENSION -> {
                     // Not a live/associative DXF DIMENSION entity — a plain line + text label that
                     // reads correctly when opened, without needing a dimension-style block setup.
