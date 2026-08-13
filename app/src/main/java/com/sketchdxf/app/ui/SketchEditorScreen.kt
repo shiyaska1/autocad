@@ -282,6 +282,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
+    // TEMPORARY diagnostic readout (see the small text over the canvas's bottom-left corner):
+    // shows the exact scale/offset/raw-tap/converted-content numbers behind the last tap, so a
+    // "drew somewhere else after zooming" report can be screenshotted with the real numbers
+    // attached instead of being chased blind. Safe to remove once that's root-caused for good.
+    var lastTouchDebug by remember { mutableStateOf("") }
 
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
@@ -1872,8 +1877,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     // without correcting for it, every tool can only ever reach whatever was
                     // visible at viewScale=1 / viewOffset=(0,0), no matter how far you zoom or pan
                     // afterward.
-                    fun toContentSpace(raw: Offset): Offset =
-                        Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                    fun toContentSpace(raw: Offset): Offset {
+                        val content = Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                        lastTouchDebug = "scale=${"%.3f".format(viewScale)} off=(${"%.0f".format(viewOffset.x)}," +
+                            "${"%.0f".format(viewOffset.y)}) raw=(${"%.0f".format(raw.x)},${"%.0f".format(raw.y)}) " +
+                            "content=(${"%.0f".format(content.x)},${"%.0f".format(content.y)})"
+                        return content
+                    }
                     // Hand-rolled replacements for Foundation's detectTapGestures/detectDragGestures
                     // (same call signatures, so no tool-specific logic below needed to change) that
                     // fix a second, subtler bug on top of the content-space conversion above: the
@@ -2535,6 +2545,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
                             .background(Color.White.copy(alpha = 0.85f), CircleShape)
                     ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
+                }
+                if (lastTouchDebug.isNotBlank()) {
+                    Text(
+                        lastTouchDebug, color = Color.White, style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.BottomStart).padding(4.dp)
+                            .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 4.dp, vertical = 2.dp)
+                    )
                 }
             }
 
