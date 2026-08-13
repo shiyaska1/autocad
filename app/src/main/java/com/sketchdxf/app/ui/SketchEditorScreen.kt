@@ -557,6 +557,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return Offset(base1.x + nx, base1.y + ny) to Offset(base2.x + nx, base2.y + ny)
     }
 
+    /** Rough bounding rect of a DIMENSION's text label as actually drawn (see the drawing loop),
+     *  for hit-testing — the label sits at the offset line's midpoint but, especially at the
+     *  larger default text size, can extend well clear of the thin line itself, so tapping the
+     *  (much more visible) text needs to work even when it's not within reach of the line. Doesn't
+     *  need to be pixel-exact, just close enough to cover what's actually on screen. */
+    fun dimTextHitRect(s: SketchShape, p1: Offset, p2: Offset): androidx.compose.ui.geometry.Rect {
+        val mx = (p1.x + p2.x) / 2f; val my = (p1.y + p2.y) / 2f
+        val sizePx = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(10f) else screenPxToContent(34f)
+        val w = s.label.length * sizePx * 0.56f
+        return androidx.compose.ui.geometry.Rect(mx, my - sizePx, mx + w + screenPxToContent(8f), my + sizePx * 0.3f)
+    }
+
     fun hitTest(p: Offset): Int {
         var best = -1; var bestDist = screenPxToContent(26f)
         shapes.forEachIndexed { i, s ->
@@ -570,9 +582,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 ShapeKind.DIMENSION -> {
                     // Hit-test the line as it's actually drawn (offset from the object, if any),
                     // not the invisible measured segment — otherwise tapping the visible dimension
-                    // line/text wouldn't select it once it's drawn clear of the object.
+                    // line/text wouldn't select it once it's drawn clear of the object. Also checks
+                    // the text label's own area, since it commonly sits well clear of the thin line.
                     val (dp1, dp2) = dimLineEndpoints(s)
-                    distToSegment(p, dp1, dp2)
+                    val lineDist = distToSegment(p, dp1, dp2)
+                    if (s.label.isNotBlank()) minOf(lineDist, distToRect(p, dimTextHitRect(s, dp1, dp2))) else lineDist
                 }
                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                     val pts = SketchPath.parse(s.path)
