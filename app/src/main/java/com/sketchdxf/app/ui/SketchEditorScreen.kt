@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Straighten
@@ -765,6 +766,23 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         pushViewHistory()
         viewScale = scale
         viewOffset = clampViewOffset(Offset(cw / 2f - midX * scale, ch / 2f - midY * scale), scale)
+    }
+
+    /** Manual escape hatch for "my tap isn't landing where I tapped" — resets the view transform
+     *  (and clears any in-flight gesture/tool state that might be holding a stale drag/selection
+     *  point) back to a known-good baseline, rather than making the user hunt for what drifted.
+     *  Recomputes from the actual shapes/canvas size, same as [fitToScreen], so it self-corrects
+     *  regardless of what caused the drift; falls back to the identity transform when there's
+     *  nothing yet drawn to fit to. */
+    fun recalibrateView() {
+        resetToolState()
+        if (shapes.isNotEmpty()) {
+            fitToScreen()
+        } else {
+            pushViewHistory()
+            viewScale = 1f
+            viewOffset = Offset.Zero
+        }
     }
 
     /** Shifts a shape by (dx, dy) in canvas-pixel space — used by group Move and by Copy's paste offset. */
@@ -1854,6 +1872,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
                         IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
                         IconButton(onClick = { fitToScreen() }) { Icon(Icons.Filled.FitScreen, "Fit all shapes on screen") }
+                        IconButton(onClick = { recalibrateView() }) { Icon(Icons.Filled.Refresh, "Recalibrate screen") }
                         IconButton(onClick = { fullscreenCanvas = true }) { Icon(Icons.Filled.Fullscreen, "Fullscreen canvas") }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -2837,6 +2856,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
                             .background(Color.White.copy(alpha = 0.85f), CircleShape)
                     ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
+                    // Fullscreen mode has no top app bar, so the recalibrate escape hatch needs
+                    // its own always-visible button here too — same fix as the top bar's, just
+                    // reachable without leaving fullscreen first.
+                    IconButton(
+                        onClick = { recalibrateView() },
+                        modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                            .background(Color.White.copy(alpha = 0.85f), CircleShape)
+                    ) { Icon(Icons.Filled.Refresh, "Recalibrate screen") }
                 }
             }
 
