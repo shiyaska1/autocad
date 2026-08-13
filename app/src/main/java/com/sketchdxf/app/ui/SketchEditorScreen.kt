@@ -14,8 +14,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectDragGestures as foundationDetectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures as foundationDetectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1873,25 +1871,63 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     // screen coordinates rather than being converted back into local space — so
                     // without correcting for it, every tool can only ever reach whatever was
                     // visible at viewScale=1 / viewOffset=(0,0), no matter how far you zoom or pan
-                    // afterward. These two are drop-in replacements for detectTapGestures/
-                    // detectDragGestures — same call signatures as the real ones below, so none of
-                    // the tool-specific gesture logic needed to change, only the coordinates it's
-                    // handed.
+                    // afterward.
                     fun toContentSpace(raw: Offset): Offset =
                         Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                    // Hand-rolled replacements for Foundation's detectTapGestures/detectDragGestures
+                    // (same call signatures, so no tool-specific logic below needed to change) that
+                    // fix a second, subtler bug on top of the content-space conversion above: the
+                    // stock detectors only ever track the FIRST pointer that went down, so releasing
+                    // a two-finger pinch-zoom one finger at a time — the normal way to end a pinch —
+                    // has that first finger's own eventual lift look, to the stock detector, exactly
+                    // like an ordinary single-finger tap/drag. That fired a tool action wherever that
+                    // finger of the *pinch* happened to be, not at the user's actual next, deliberate
+                    // tap — this is what "zoom, then tap to draw, and it draws somewhere else" was.
+                    // Fix: refuse to fire at all once a second pointer joins partway through.
                     suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
-                        foundationDetectTapGestures(onTap = { raw -> onTap(toContentSpace(raw)) })
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.isConsumed) return@awaitEachGesture
+                                if (!change.pressed) {
+                                    if (!multiTouch) onTap(toContentSpace(change.position))
+                                    break
+                                }
+                            }
+                        }
                     }
                     suspend fun PointerInputScope.detectDragGestures(
                         onDragStart: (Offset) -> Unit = {},
                         onDrag: (Offset) -> Unit,
                         onDragEnd: () -> Unit = {}
                     ) {
-                        foundationDetectDragGestures(
-                            onDragStart = { raw -> onDragStart(toContentSpace(raw)) },
-                            onDrag = { change, _ -> onDrag(toContentSpace(change.position)) },
-                            onDragEnd = { onDragEnd() }
-                        )
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            var dragging = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (multiTouch || change.isConsumed) {
+                                    if (dragging) onDragEnd()
+                                    return@awaitEachGesture
+                                }
+                                if (change.positionChanged()) {
+                                    if (!dragging) { dragging = true; onDragStart(toContentSpace(change.position)) }
+                                    onDrag(toContentSpace(change.position))
+                                    change.consume()
+                                }
+                                if (!change.pressed) {
+                                    if (dragging) onDragEnd()
+                                    break
+                                }
+                            }
+                        }
                     }
                     Canvas(
                         Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
