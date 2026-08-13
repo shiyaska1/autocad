@@ -1,7 +1,6 @@
 package com.sketchdxf.app.dxf
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -30,11 +29,7 @@ object PreviewRenderer {
         return floatArrayOf(s.x1 + nx, s.y1 + ny, s.x2 + nx, s.y2 + ny)
     }
 
-    /** [includeImages] draws every inserted reference IMAGE too — off by default, matching the
-     *  editor's own background image not being part of this preview either; shared/exported
-     *  pictures should only pick these up when explicitly asked for (see DxfDetailScreen's
-     *  "Share picture" checkbox). */
-    fun render(shapes: List<SketchShape>, size: Int = 900, includeImages: Boolean = false): Bitmap {
+    fun render(shapes: List<SketchShape>, size: Int = 900): Bitmap {
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(Color.WHITE)
@@ -68,10 +63,6 @@ object PreviewRenderer {
                 ShapeKind.ARC -> {
                     minX = min(minX, s.cx - s.r); maxX = max(maxX, s.cx + s.r)
                     minY = min(minY, s.cy - s.r); maxY = max(maxY, s.cy + s.r)
-                }
-                ShapeKind.IMAGE -> if (includeImages) {
-                    minX = min(minX, min(s.x1, s.x2)); maxX = max(maxX, max(s.x1, s.x2))
-                    minY = min(minY, min(s.y1, s.y2)); maxY = max(maxY, max(s.y1, s.y2))
                 }
             }
         }
@@ -125,13 +116,6 @@ object PreviewRenderer {
                     val (startDeg, sweepDeg) = SketchArc.sweepFor(s.cx, s.cy, s.x1, s.y1, s.x2, s.y2, s.major)
                     val oval = RectF(px(s.cx - s.r), py(s.cy - s.r), px(s.cx + s.r), py(s.cy + s.r))
                     canvas.drawArc(oval, startDeg, sweepDeg, false, paintFor(s, linePaint))
-                }
-                ShapeKind.IMAGE -> if (includeImages) {
-                    val imgBmp = runCatching { BitmapFactory.decodeFile(s.path) }.getOrNull()
-                    if (imgBmp != null) {
-                        val dst = RectF(px(min(s.x1, s.x2)), py(min(s.y1, s.y2)), px(max(s.x1, s.x2)), py(max(s.y1, s.y2)))
-                        canvas.drawBitmap(imgBmp, null, dst, null)
-                    }
                 }
             }
         }
