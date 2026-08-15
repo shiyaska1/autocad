@@ -1813,39 +1813,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { showBlockPicker = false }
         )
     }
-    if (showImageSourceDialog) {
-        ImageSourceDialog(
-            onCamera = { showImageSourceDialog = false; imageCamera() },
-            onGallery = {
-                showImageSourceDialog = false
-                imageGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onFile = { showImageSourceDialog = false; imageFilePicker.launch(arrayOf("image/*")) },
-            onCancel = { showImageSourceDialog = false }
-        )
-    }
-    if (showOcrSourceDialog) {
-        ImageSourceDialog(
-            onCamera = { showOcrSourceDialog = false; ocrCamera() },
-            onGallery = {
-                showOcrSourceDialog = false
-                ocrGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onFile = { showOcrSourceDialog = false; ocrFilePicker.launch(arrayOf("image/*")) },
-            onCancel = { showOcrSourceDialog = false }
-        )
-    }
-    pendingOcrImagePath?.let { path ->
-        OcrTextDialog(
-            imagePath = path,
-            onResult = { text ->
-                pendingOcrImagePath = null
-                pendingOcrText = text
-                tool = Tool.TEXT
-            },
-            onCancel = { pendingOcrImagePath = null }
-        )
-    }
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
         FilletRadiusDialog(
             error = filletError,
@@ -1939,6 +1906,39 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
     val ocrFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         handleOcrImagePicked(uri)
+    }
+    if (showImageSourceDialog) {
+        ImageSourceDialog(
+            onCamera = { showImageSourceDialog = false; imageCamera() },
+            onGallery = {
+                showImageSourceDialog = false
+                imageGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onFile = { showImageSourceDialog = false; imageFilePicker.launch(arrayOf("image/*")) },
+            onCancel = { showImageSourceDialog = false }
+        )
+    }
+    if (showOcrSourceDialog) {
+        ImageSourceDialog(
+            onCamera = { showOcrSourceDialog = false; ocrCamera() },
+            onGallery = {
+                showOcrSourceDialog = false
+                ocrGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onFile = { showOcrSourceDialog = false; ocrFilePicker.launch(arrayOf("image/*")) },
+            onCancel = { showOcrSourceDialog = false }
+        )
+    }
+    pendingOcrImagePath?.let { path ->
+        OcrTextDialog(
+            imagePath = path,
+            onResult = { text ->
+                pendingOcrImagePath = null
+                pendingOcrText = text
+                tool = Tool.TEXT
+            },
+            onCancel = { pendingOcrImagePath = null }
+        )
     }
 
     fun runCommand(raw: String) {
