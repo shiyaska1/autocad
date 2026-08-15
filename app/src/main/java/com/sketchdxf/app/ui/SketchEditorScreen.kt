@@ -900,12 +900,32 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         return ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq
     }
 
+    /** Fabricates two real, generously far-apart endpoints for an XLINE (which has none, by
+     *  design — see ShapeKind.XLINE), spanning well past the current view — safe to feed straight
+     *  into ordinary two-endpoint operations like Trim/Fillet below, which end up overwriting
+     *  whichever end got recomputed and storing the result as kind = LINE, converting it into a
+     *  genuine bounded line for good (matching real AutoCAD: trimming/filleting a construction
+     *  line turns it into a normal one). */
+    fun xlineAsLongLine(s: SketchShape): SketchShape {
+        val dir = Offset(s.x2 - s.x1, s.y2 - s.y1)
+        val dirLen = hypotF(dir.x, dir.y).coerceAtLeast(1e-6f)
+        val ux = dir.x / dirLen; val uy = dir.y / dirLen
+        val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
+        val reach = if (cw > 0f && ch > 0f) hypotF(cw, ch) / viewScale.coerceAtLeast(0.001f) else 5000f
+        return s.copy(
+            kind = ShapeKind.LINE,
+            x1 = s.x1 - ux * reach, y1 = s.y1 - uy * reach,
+            x2 = s.x1 + ux * reach, y2 = s.y1 + uy * reach
+        )
+    }
+
     /** Trims the selected target line at its intersection with the boundary, removing whichever
      *  side [p] was tapped on. */
     fun trimAt(p: Offset) {
         val boundary = shapes.getOrNull(trimBoundaryIndex)
-        val target = shapes.getOrNull(trimTargetIndex)
-        if (boundary != null && target != null) {
+        val targetRaw = shapes.getOrNull(trimTargetIndex)
+        if (boundary != null && targetRaw != null) {
+            val target = if (targetRaw.kind == ShapeKind.XLINE) xlineAsLongLine(targetRaw) else targetRaw
             val inter = lineIntersection(boundary, target)
             if (inter != null) {
                 val a = Offset(target.x1, target.y1); val b = Offset(target.x2, target.y2)
@@ -968,8 +988,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
      *  [near1]/[near2] (the tap points that picked each line) identify which end of each line is
      *  at this corner — the other end is left untouched. Returns an error message, or null on success. */
     fun performFillet(idx1: Int, idx2: Int, radiusPx: Float, near1: Offset, near2: Offset): String? {
-        val l1 = shapes.getOrNull(idx1) ?: return "That line no longer exists"
-        val l2 = shapes.getOrNull(idx2) ?: return "That line no longer exists"
+        val l1Raw = shapes.getOrNull(idx1) ?: return "That line no longer exists"
+        val l2Raw = shapes.getOrNull(idx2) ?: return "That line no longer exists"
+        // Same XLINE -> real-endpoints conversion as Trim above — fillet ends up storing a
+        // recomputed endpoint on each side either way, converting an XLINE into a genuine LINE.
+        val l1 = if (l1Raw.kind == ShapeKind.XLINE) xlineAsLongLine(l1Raw) else l1Raw
+        val l2 = if (l2Raw.kind == ShapeKind.XLINE) xlineAsLongLine(l2Raw) else l2Raw
         val inter = lineIntersection(l1, l2) ?: return "Those lines are parallel — no corner to fillet"
 
         fun nearEndIsFirst(s: SketchShape, tap: Offset) =
@@ -2535,8 +2559,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                         drawLine(
                                             shapeColor(s, Color(0xFF6A1B9A), isHighlighted), p1, p2,
-                                            strokeWidth = strokeW(s, 1.5f, isHighlighted),
-                                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(18f), minPx(10f)))
+                                            strokeWidth = strokeW(s, 1.5f, isHighlighted)
                                         )
                                     }
                                 }
