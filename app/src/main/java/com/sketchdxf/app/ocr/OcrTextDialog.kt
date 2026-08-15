@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -110,8 +112,14 @@ fun OcrTextDialog(imagePath: String, onResult: (String) -> Unit, onCancel: () ->
                 WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT
             )
         }
+        // A scrollable, height-bounded layout rather than a weight(1f) image box filling
+        // whatever's left: weight(1f) trusted the Dialog window to be exactly screen-sized to
+        // leave room below it for the Recognize/Cancel row, which the MATCH_PARENT fix above
+        // didn't reliably guarantee across devices — this way the row is always reachable
+        // (scroll to it) regardless of how tall the window or the image ends up being.
         Column(
-            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(12.dp)
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)
+                .verticalScroll(rememberScrollState()).padding(12.dp)
         ) {
             Text("Select the text area", style = MaterialTheme.typography.titleMedium)
             Text(
@@ -120,12 +128,12 @@ fun OcrTextDialog(imagePath: String, onResult: (String) -> Unit, onCancel: () ->
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             if (bitmap == null) {
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
                     Text("Couldn't open that picture", color = MaterialTheme.colorScheme.error)
                 }
             } else {
                 Box(
-                    Modifier.fillMaxWidth().weight(1f).onSizeChanged { displayedSize = Size(it.width.toFloat(), it.height.toFloat()) }
+                    Modifier.fillMaxWidth().height(420.dp).onSizeChanged { displayedSize = Size(it.width.toFloat(), it.height.toFloat()) }
                 ) {
                     Image(
                         bitmap.asImageBitmap(), null,
