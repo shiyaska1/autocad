@@ -14,6 +14,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -282,11 +284,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // Pinch-zoom/pan — a pure view transform; shape coordinates are never affected by it.
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
-    // TEMPORARY diagnostic readout (see the small text over the canvas's bottom-left corner):
-    // shows the exact scale/offset/raw-tap/converted-content numbers behind the last tap, so a
-    // "drew somewhere else after zooming" report can be screenshotted with the real numbers
-    // attached instead of being chased blind. Safe to remove once that's root-caused for good.
-    var lastTouchDebug by remember { mutableStateOf("") }
 
     // CAD-style line input: tap a start point, tap an end point — the line is drawn between them
     // immediately (Ortho locks the end point to horizontal/vertical from the start, like AutoCAD).
@@ -1869,82 +1866,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
-                    // The canvas below draws in its own fixed local coordinate space (the same
-                    // space shapes are stored in); the Box above it uniformly scales/pans that
-                    // whole space for display via graphicsLayer. Touches delivered to a
-                    // pointerInput nested inside that transform come through as raw, untransformed
-                    // screen coordinates rather than being converted back into local space — so
-                    // without correcting for it, every tool can only ever reach whatever was
-                    // visible at viewScale=1 / viewOffset=(0,0), no matter how far you zoom or pan
-                    // afterward.
-                    fun toContentSpace(raw: Offset): Offset {
-                        val content = Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
-                        lastTouchDebug = "scale=${"%.3f".format(viewScale)} off=(${"%.0f".format(viewOffset.x)}," +
-                            "${"%.0f".format(viewOffset.y)}) raw=(${"%.0f".format(raw.x)},${"%.0f".format(raw.y)}) " +
-                            "content=(${"%.0f".format(content.x)},${"%.0f".format(content.y)})"
-                        return content
-                    }
-                    // Hand-rolled replacements for Foundation's detectTapGestures/detectDragGestures
-                    // (same call signatures, so no tool-specific logic below needed to change) that
-                    // fix a second, subtler bug on top of the content-space conversion above: the
-                    // stock detectors only ever track the FIRST pointer that went down, so releasing
-                    // a two-finger pinch-zoom one finger at a time — the normal way to end a pinch —
-                    // has that first finger's own eventual lift look, to the stock detector, exactly
-                    // like an ordinary single-finger tap/drag. That fired a tool action wherever that
-                    // finger of the *pinch* happened to be, not at the user's actual next, deliberate
-                    // tap — this is what "zoom, then tap to draw, and it draws somewhere else" was.
-                    // Fix: refuse to fire at all once a second pointer joins partway through.
-                    suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            var multiTouch = false
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                if (event.changes.size > 1) multiTouch = true
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (change.isConsumed) return@awaitEachGesture
-                                if (!change.pressed) {
-                                    if (!multiTouch) onTap(toContentSpace(change.position))
-                                    break
-                                }
-                            }
-                        }
-                    }
-                    suspend fun PointerInputScope.detectDragGestures(
-                        onDragStart: (Offset) -> Unit = {},
-                        onDrag: (Offset) -> Unit,
-                        onDragEnd: () -> Unit = {}
-                    ) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            var multiTouch = false
-                            var dragging = false
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                if (event.changes.size > 1) multiTouch = true
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (multiTouch || change.isConsumed) {
-                                    if (dragging) onDragEnd()
-                                    return@awaitEachGesture
-                                }
-                                if (change.positionChanged()) {
-                                    if (!dragging) { dragging = true; onDragStart(toContentSpace(change.position)) }
-                                    onDrag(toContentSpace(change.position))
-                                    change.consume()
-                                }
-                                if (!change.pressed) {
-                                    if (dragging) onDragEnd()
-                                    break
-                                }
-                            }
-                        }
-                    }
                     Canvas(
                         Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
-                                    onDrag = { p -> dragCurrent = p },
+                                    onDrag = { change, _ -> dragCurrent = change.position },
                                     onDragEnd = {
                                         val s = dragStart; val c = dragCurrent
                                         if (s != null && c != null) {
@@ -1959,7 +1886,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 )
                                 Tool.RECTANGLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = trySnapPoint(p); dragCurrent = dragStart },
-                                    onDrag = { p -> dragCurrent = p },
+                                    onDrag = { change, _ -> dragCurrent = change.position },
                                     onDragEnd = {
                                         val s = dragStart; val c0 = dragCurrent
                                         if (s != null && c0 != null) {
@@ -2070,10 +1997,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             selectTapStart = p
                                         }
                                     },
-                                    onDrag = { p ->
+                                    onDrag = { change, _ ->
                                         val idx = gripDragIndex
                                         if (idx >= 0) {
-                                            val np = trySnapPoint(p)
+                                            val np = trySnapPoint(change.position)
                                             val s = shapes[idx]
                                             // Reshaping an endpoint by hand invalidates any previously
                                             // confirmed/typed real-world length, same as Trim/Extend/Break.
@@ -2131,7 +2058,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.PAN -> {}
                                 Tool.FREEHAND -> detectDragGestures(
                                     onDragStart = { p -> freehandPoints.clear(); freehandPoints.add(p) },
-                                    onDrag = { p -> freehandPoints.add(p) },
+                                    onDrag = { change, _ -> freehandPoints.add(change.position) },
                                     onDragEnd = {
                                         if (freehandPoints.size >= 2) {
                                             if (freehandRoomMode) {
@@ -2157,9 +2084,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // point (if Snap is on) is highlighted and used as the actual drop point.
                                     detectDragGestures(
                                         onDragStart = { p -> moveDragStart = p; moveDragCurrent = p; moveSnapTarget = null },
-                                        onDrag = { p ->
-                                            moveDragCurrent = p
-                                            moveSnapTarget = findSnapPoint(p, selectedIndices)
+                                        onDrag = { change, _ ->
+                                            moveDragCurrent = change.position
+                                            moveSnapTarget = findSnapPoint(change.position, selectedIndices)
                                         },
                                         onDragEnd = {
                                             val s = moveDragStart; val c = moveSnapTarget ?: moveDragCurrent
@@ -2183,7 +2110,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 } else {
                                     detectDragGestures(
                                         onDragStart = { p -> selectDragStart = p; selectDragCurrent = p },
-                                        onDrag = { p -> selectDragCurrent = p },
+                                        onDrag = { change, _ -> selectDragCurrent = change.position },
                                         onDragEnd = {
                                             val s = selectDragStart; val c = selectDragCurrent
                                             if (s != null && c != null) {
@@ -2246,7 +2173,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.STRETCH -> if (!stretchArmed) {
                                     detectDragGestures(
                                         onDragStart = { p -> stretchDragStart = p; stretchDragCurrent = p },
-                                        onDrag = { p -> stretchDragCurrent = p },
+                                        onDrag = { change, _ -> stretchDragCurrent = change.position },
                                         onDragEnd = {
                                             val s = stretchDragStart; val c = stretchDragCurrent
                                             if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
@@ -2545,13 +2472,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
                             .background(Color.White.copy(alpha = 0.85f), CircleShape)
                     ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
-                }
-                if (lastTouchDebug.isNotBlank()) {
-                    Text(
-                        lastTouchDebug, color = Color.White, style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.BottomStart).padding(4.dp)
-                            .background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
                 }
             }
 
