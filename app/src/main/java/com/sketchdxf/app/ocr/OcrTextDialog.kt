@@ -18,7 +18,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import android.view.WindowManager
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,9 +36,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -95,6 +99,17 @@ fun OcrTextDialog(imagePath: String, onResult: (String) -> Unit, onCancel: () ->
     }
 
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        // usePlatformDefaultWidth = false alone only frees up the WIDTH — a plain Compose Dialog's
+        // underlying window still defaults to WRAP_CONTENT height, so a fillMaxSize() Column inside
+        // it doesn't reliably get the full screen: the recognize/cancel row at the bottom could end
+        // up outside the window's actual (wrap-measured) bounds instead of visible below the image.
+        // Forcing the real Android window to MATCH_PARENT is the standard fix for that.
+        val view = LocalView.current
+        SideEffect {
+            (view.parent as? DialogWindowProvider)?.window?.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT
+            )
+        }
         Column(
             Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(12.dp)
         ) {
@@ -121,7 +136,7 @@ fun OcrTextDialog(imagePath: String, onResult: (String) -> Unit, onCancel: () ->
                         Modifier.fillMaxSize().pointerInput(Unit) {
                             detectDragGestures(
                                 onDragStart = { p -> dragStart = p; dragCurrent = p },
-                                onDrag = { change, _ -> dragCurrent = change.position },
+                                onDrag = { change, _ -> change.consume(); dragCurrent = change.position },
                                 onDragEnd = {}
                             )
                         }
