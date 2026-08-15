@@ -2472,6 +2472,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
                             .background(Color.White.copy(alpha = 0.85f), CircleShape)
                     ) { Icon(Icons.Filled.FullscreenExit, "Exit fullscreen") }
+                    // Fullscreen mode has no top app bar, so "Fit all shapes on screen" — the
+                    // reinitialize-the-viewport escape hatch — needs its own reachable copy here
+                    // too, same as the exit button beside it.
+                    IconButton(
+                        onClick = { fitToScreen() },
+                        modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                            .background(Color.White.copy(alpha = 0.85f), CircleShape)
+                    ) { Icon(Icons.Filled.FitScreen, "Fit all shapes on screen") }
                 }
             }
 
