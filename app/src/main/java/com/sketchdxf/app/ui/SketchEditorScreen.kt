@@ -294,6 +294,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var orthoOn by remember { mutableStateOf(true) }
     var snapOn by remember { mutableStateOf(true) }
     var chainOn by remember { mutableStateOf(true) }
+    // AutoCAD-style Polar tracking: an alternative to Ortho for angles other than 0/90/180/270 —
+    // only takes effect when Ortho is off, snapping the drawn angle to the nearest multiple of
+    // polarAngleDeg instead of leaving it exactly as tapped.
+    var polarOn by remember { mutableStateOf(false) }
+    var polarAngleDeg by remember { mutableStateOf(45f) }
+    var showPolarAngleDialog by remember { mutableStateOf(false) }
     // Wall mode: each LINE drawn is treated as a wall's inside face — a second, parallel line is
     // auto-added on the outside at the given thickness. Chained (connected) wall segments have
     // their outside lines mitered to meet exactly at the corner instead of gapping/overlapping.
@@ -448,6 +454,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun orthoProject(start: Offset, raw: Offset): Offset {
         val dx = raw.x - start.x; val dy = raw.y - start.y
         return if (abs(dx) >= abs(dy)) Offset(raw.x, start.y) else Offset(start.x, raw.y)
+    }
+
+    /** Locks [raw]'s angle from [start] onto the nearest multiple of [angleDeg] — same distance as
+     *  tapped, just rounded to the nearest allowed direction, like AutoCAD's Polar tracking. Used
+     *  instead of [orthoProject] when Ortho is off but Polar is on. */
+    fun polarProject(start: Offset, raw: Offset, angleDeg: Float): Offset {
+        val dx = raw.x - start.x; val dy = raw.y - start.y
+        val dist = hypotF(dx, dy)
+        if (dist < 1e-3f || angleDeg <= 0f) return raw
+        val rawAngle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+        val snappedAngle = Math.round(rawAngle / angleDeg) * angleDeg
+        val rad = Math.toRadians(snappedAngle.toDouble())
+        return Offset(start.x + (dist * cos(rad)).toFloat(), start.y + (dist * sin(rad)).toFloat())
     }
 
     /** Pixels per real-world mm, derived from confirmed lines so far (or a sensible default). */
@@ -1337,6 +1356,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
         )
     }
+    if (showPolarAngleDialog) {
+        PolarAngleDialog(
+            initial = trimNum(polarAngleDeg.toDouble()),
+            onConfirm = { v -> polarAngleDeg = v; showPolarAngleDialog = false },
+            onCancel = { showPolarAngleDialog = false }
+        )
+    }
     if (showWallThicknessDialog) {
         WallThicknessDialog(
             initial = wallThickness?.let { trimNum(mmToDisplay(it, unit)) } ?: "",
@@ -1544,6 +1570,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             commandFeedback = if (before == 0) "Nothing selected to explode" else null
             return
         }
+        // ERASE (AutoCAD's own "E" alias) — same reasoning as EXPLODE above: it acts on the
+        // current selection, so it must run before resetToolState() clears it.
+        if (cmd == "E" || cmd == "ERASE") {
+            val before = selectedIndices.size
+            deleteSelection()
+            commandFeedback = if (before == 0) "Nothing selected to erase" else null
+            return
+        }
         // A normal command replaces whatever's active, same as AutoCAD starting a new command;
         // a transparent one leaves the current tool/in-progress points alone.
         if (!transparent) resetToolState()
@@ -1734,13 +1768,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     )
                 }
             }
-            if (tool == Tool.LINE || tool == Tool.RECTANGLE || tool == Tool.DIMENSION) {
+            if (tool == Tool.LINE || tool == Tool.RECTANGLE || tool == Tool.DIMENSION || tool == Tool.STRETCH) {
                 Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (tool != Tool.DIMENSION) {
                         FilterChip(selected = orthoOn, onClick = { orthoOn = !orthoOn }, label = { Text("Ortho") })
                     }
                     FilterChip(selected = snapOn, onClick = { snapOn = !snapOn }, label = { Text("Snap") })
                     if (tool == Tool.LINE) FilterChip(selected = chainOn, onClick = { chainOn = !chainOn }, label = { Text("Chain") })
+                    if (tool == Tool.LINE || tool == Tool.STRETCH) {
+                        // Polar only ever takes effect when Ortho is off (see polarProject's call
+                        // sites) — same relationship AutoCAD's own Ortho/Polar have.
+                        FilterChip(selected = polarOn, onClick = { polarOn = !polarOn }, label = { Text("Polar") })
+                        TextButton(onClick = { showPolarAngleDialog = true }) { Text("${trimNum(polarAngleDeg.toDouble())}°") }
+                    }
                     if (tool == Tool.LINE) {
                         FilterChip(
                             selected = wallModeOn,
@@ -1980,7 +2020,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         lineStartPoint = trySnapPoint(p)
                                     } else {
                                         val snapped = trySnapPoint(p)
-                                        val end = if (orthoOn) orthoProject(start, snapped) else snapped
+                                        val end = when {
+                                            orthoOn -> orthoProject(start, snapped)
+                                            polarOn -> polarProject(start, snapped, polarAngleDeg)
+                                            else -> snapped
+                                        }
                                         if (hypotF(end.x - start.x, end.y - start.y) > 4f) {
                                             pushUndo()
                                             shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false, color = currentColor?.toArgb()))
@@ -2262,7 +2306,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             stretchBasePoint = trySnapPoint(p)
                                         } else {
                                             val snapped = trySnapPoint(p)
-                                            val delta = Offset(snapped.x - base.x, snapped.y - base.y)
+                                            val projected = when {
+                                                orthoOn -> orthoProject(base, snapped)
+                                                polarOn -> polarProject(base, snapped, polarAngleDeg)
+                                                else -> snapped
+                                            }
+                                            val delta = Offset(projected.x - base.x, projected.y - base.y)
                                             val mag = hypotF(delta.x, delta.y)
                                             if (mag > 2f) {
                                                 stretchDirection = Offset(delta.x / mag, delta.y / mag)
@@ -2888,6 +2937,37 @@ private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -
 /** Asked once each time Wall mode is switched on: every LINE drawn from then on gets a second,
  *  parallel outside-face line at this thickness — see SketchEditorScreen's addWallOuterLine. */
 @Composable
+private fun PolarAngleDialog(initial: String, onConfirm: (Float) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Polar angle") },
+        text = {
+            Column {
+                Text(
+                    "With Ortho off and Polar on, a line's angle snaps to the nearest multiple of this — e.g. 30° snaps to 0, 30, 60, 90...",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Angle increment (°)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toFloatOrNull()
+                if (v == null || v <= 0f || v > 180f) error = "Enter an angle between 0 and 180" else onConfirm(v)
+            }) { Text("Set") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
 private fun WallThicknessDialog(initial: String, unitLabel: String, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
     var text by remember { mutableStateOf(initial) }
     var error by remember { mutableStateOf<String?>(null) }
