@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -2507,7 +2508,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // with the Dimension tool.
                                     val lineColor = shapeColor(s, if (s.confirmed) Color(0xFF2E7D32) else linePaint, isHighlighted)
                                     val w = strokeW(s, 5f, isHighlighted)
-                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = w)
+                                    // s.major doubles as a "dashed" flag for LINE (see ShapeEditDialog) —
+                                    // an internal/reference line style, distinct from a plain solid one.
+                                    val dashEffect = if (s.major) {
+                                        androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(14f), minPx(8f)))
+                                    } else null
+                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = w, pathEffect = dashEffect)
                                 }
                                 ShapeKind.CIRCLE -> drawCircle(
                                     shapeColor(s, linePaint, isHighlighted), radius = s.r, center = Offset(s.cx, s.cy),
@@ -3385,6 +3391,10 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
             var pickedColor by remember { mutableStateOf(shape.color?.let { Color(it) }) }
             var showHandwrite by remember { mutableStateOf(false) }
             var widthText by remember { mutableStateOf(if (shape.strokeWidth > 0f) trimNum(shape.strokeWidth.toDouble()) else "") }
+            // Reuses SketchShape.major (otherwise only meaningful for ARC) as a LINE's dashed
+            // flag — an internal/reference line style, distinct from a plain solid line, same
+            // "one existing column, no migration" convention IMAGE already uses for x1/y1/x2/y2.
+            var dashed by remember { mutableStateOf(shape.major) }
             if (showHandwrite) {
                 HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
             }
@@ -3407,6 +3417,10 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                         )
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                            Checkbox(checked = dashed, onCheckedChange = { dashed = it })
+                            Text("Dashed (internal/reference line)")
+                        }
                     }
                 },
                 confirmButton = {
@@ -3414,8 +3428,8 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                         val v = text.toDoubleOrNull()
                         val colorArgb = pickedColor?.toArgb()
                         val widthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
-                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb, strokeWidth = widthPx))
-                        else onConfirm(shape.copy(confirmed = false, color = colorArgb, strokeWidth = widthPx))
+                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb, strokeWidth = widthPx, major = dashed))
+                        else onConfirm(shape.copy(confirmed = false, color = colorArgb, strokeWidth = widthPx, major = dashed))
                     }) { Text("Confirm") }
                 },
                 dismissButton = {
