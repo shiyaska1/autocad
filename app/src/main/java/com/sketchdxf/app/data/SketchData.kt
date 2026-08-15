@@ -116,6 +116,16 @@ object ShapeKind {
      *  flag already use. The boundary lines themselves are untouched, separate shapes; this only
      *  draws the internal crosshatch lines clipped to the polygon. */
     const val HATCH = "HATCH"
+    /** A photo/picture dropped onto the canvas as its own movable/scalable object (not the
+     *  editor's single full-canvas trace-over background — see baseImagePath) — [SketchShape.x1],
+     *  [SketchShape.y1]/[SketchShape.x2],[SketchShape.y2] are its axis-aligned bounding box's
+     *  top-left/bottom-right corners, reusing the same coordinate fields every other shape kind
+     *  does, and [SketchShape.label] holds the copied-into-app-storage image file's path (never
+     *  the original picked/captured URI, which can stop resolving once the picker closes). Move/
+     *  Copy/Scale/Delete work unmodified since those only ever touch literal x/y coordinates;
+     *  Rotate/Mirror also run but only ever reposition the two corners — the picture itself is
+     *  drawn axis-aligned (via drawImage's dstOffset/dstSize) and doesn't actually spin/flip. */
+    const val IMAGE = "IMAGE"
 }
 
 /**

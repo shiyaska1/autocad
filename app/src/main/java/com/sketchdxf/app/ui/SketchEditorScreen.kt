@@ -39,7 +39,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.NearMe
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ShowChart
@@ -81,6 +84,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
@@ -96,6 +100,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.sketchdxf.app.data.AppDatabase
@@ -107,11 +112,13 @@ import com.sketchdxf.app.data.SketchCircleFit
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import com.sketchdxf.app.data.SketchWork
+import com.sketchdxf.app.dxf.BitmapUtil
 import com.sketchdxf.app.dxf.DxfReader
 import com.sketchdxf.app.dxf.DxfWriter
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.PreviewRenderer
 import com.sketchdxf.app.dxf.SketchAttachmentStore
+import com.sketchdxf.app.ocr.rememberImageCamera
 import com.sketchdxf.app.ui.common.HandwriteInputDialog
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -119,6 +126,7 @@ import kotlin.math.acos
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.tan
 
@@ -163,7 +171,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK, XLINE }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK, XLINE, IMAGE }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -424,6 +432,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var showBlockPicker by remember { mutableStateOf(false) }
     var pendingBlockInsert by remember { mutableStateOf<SketchBlock?>(null) }
     var insertUseRatio by remember { mutableStateOf(true) }
+    // Insert Image: showImageSourceDialog offers Camera/Gallery/File; once one of those returns a
+    // picked photo, pendingImagePath/pendingImageAspect hold it until the next canvas tap places
+    // it (see handleImagePicked and Tool.IMAGE's gesture handler).
+    var showImageSourceDialog by remember { mutableStateOf(false) }
+    var pendingImagePath by remember { mutableStateOf<String?>(null) }
+    var pendingImageAspect by remember { mutableStateOf<Float?>(null) }
+    val imageBitmapCache = remember { mutableMapOf<String, ImageBitmap?>() }
+    fun bitmapForImagePath(path: String): ImageBitmap? {
+        if (path.isBlank()) return null
+        if (imageBitmapCache.containsKey(path)) return imageBitmapCache[path]
+        val bmp = runCatching { BitmapUtil.decodeOriented(path, maxDim = 1600)?.asImageBitmap() }.getOrNull()
+        imageBitmapCache[path] = bmp
+        return bmp
+    }
     var filletTap1 by remember { mutableStateOf<Offset?>(null) }
     var filletTap2 by remember { mutableStateOf<Offset?>(null) }
     var filletError by remember { mutableStateOf<String?>(null) }
@@ -629,6 +651,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }
                 ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
                 ShapeKind.XLINE -> distToInfiniteLine(p, Offset(s.x1, s.y1), Offset(s.x2 - s.x1, s.y2 - s.y1))
+                ShapeKind.IMAGE -> {
+                    // Tapping anywhere inside the picture selects it, not just right on an edge —
+                    // it's a filled rectangle, not an outline.
+                    val r = androidx.compose.ui.geometry.Rect(
+                        minOf(s.x1, s.x2), minOf(s.y1, s.y2), maxOf(s.x1, s.x2), maxOf(s.y1, s.y2)
+                    )
+                    if (r.contains(p)) 0f else distToRect(p, r)
+                }
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
@@ -1773,6 +1803,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onDismiss = { showBlockPicker = false }
         )
     }
+    if (showImageSourceDialog) {
+        ImageSourceDialog(
+            onCamera = { showImageSourceDialog = false; imageCamera() },
+            onGallery = {
+                showImageSourceDialog = false
+                imageGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onFile = { showImageSourceDialog = false; imageFilePicker.launch(arrayOf("image/*")) },
+            onCancel = { showImageSourceDialog = false }
+        )
+    }
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
         FilletRadiusDialog(
             error = filletError,
@@ -1830,6 +1871,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
     val dxfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importDxf(uri)
+    }
+
+    // Insert Image: copies the picked/captured photo into app storage (so it survives even once
+    // the original gallery item/camera temp file is gone), reads just its pixel dimensions for
+    // an aspect-correct default placement size, then arms Tool.IMAGE so the next canvas tap drops
+    // it — same two-step "pick, then tap to place" flow as Insert Block.
+    fun handleImagePicked(uri: Uri?) {
+        if (uri == null) return
+        val path = SketchAttachmentStore.copyIn(context, uri)?.path ?: return
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        pendingImageAspect = if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth.toFloat() / bounds.outHeight else 1f
+        pendingImagePath = path
+        tool = Tool.IMAGE
+    }
+    val imageCamera = rememberImageCamera { uri -> handleImagePicked(uri) }
+    val imageGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        handleImagePicked(uri)
+    }
+    val imageFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        handleImagePicked(uri)
     }
 
     fun runCommand(raw: String) {
@@ -2005,6 +2067,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     label = { Icon(Icons.Filled.Straighten, "Room plan (type dimensions)") })
                 FilterChip(selected = tool == Tool.BLOCK, onClick = { showBlockPicker = true },
                     label = { Text("Block") })
+                FilterChip(selected = tool == Tool.IMAGE, onClick = { showImageSourceDialog = true },
+                    label = { Icon(Icons.Filled.Image, "Insert picture") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {
@@ -2201,6 +2265,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.DISTANCE -> "Tap the second point"
                     tool == Tool.BLOCK && pendingBlockInsert == null -> "Pick a block from the picker"
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
+                    tool == Tool.IMAGE && pendingImagePath == null -> "Pick a picture — camera, gallery or file"
+                    tool == Tool.IMAGE -> "Tap where to drop the picture"
                     tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && scaleModeActive -> "Tap the point the selection should scale around"
@@ -2477,6 +2543,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         // (tap "Block") for another copy instead of it repeating on
                                         // every further tap.
                                         pendingBlockInsert = null
+                                        tool = Tool.SELECT
+                                    }
+                                })
+                                Tool.IMAGE -> detectTapGestures(onTap = { p ->
+                                    val path = pendingImagePath; val aspect = pendingImageAspect
+                                    if (path != null && aspect != null) {
+                                        pushUndo()
+                                        // Default size: a chunk of the current viewport, at the
+                                        // picture's own aspect ratio — Box Select's Scale action
+                                        // resizes it further if needed, same as any other shape.
+                                        val boxW = ((canvasSize.width / viewScale).takeIf { it > 0f } ?: 800f) * 0.4f
+                                        val boxH = if (aspect > 0f) boxW / aspect else boxW
+                                        shapes.add(
+                                            SketchShape(
+                                                workId = 0, kind = ShapeKind.IMAGE,
+                                                x1 = p.x - boxW / 2f, y1 = p.y - boxH / 2f,
+                                                x2 = p.x + boxW / 2f, y2 = p.y + boxH / 2f,
+                                                label = path
+                                            )
+                                        )
+                                        pendingImagePath = null; pendingImageAspect = null
                                         tool = Tool.SELECT
                                     }
                                 })
@@ -2890,6 +2977,27 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         drawLine(hatchColor, a, b, strokeWidth = hatchW)
                                     }
                                 }
+                                ShapeKind.IMAGE -> {
+                                    val left = minOf(s.x1, s.x2); val top = minOf(s.y1, s.y2)
+                                    val w = abs(s.x2 - s.x1); val h = abs(s.y2 - s.y1)
+                                    if (w > 0f && h > 0f) {
+                                        val bmp = bitmapForImagePath(s.label)
+                                        if (bmp != null) {
+                                            drawImage(
+                                                image = bmp,
+                                                dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
+                                                dstSize = IntSize(w.roundToInt().coerceAtLeast(1), h.roundToInt().coerceAtLeast(1))
+                                            )
+                                        }
+                                        if (isHighlighted) {
+                                            drawRect(
+                                                Color(0xFF1565C0), topLeft = Offset(left, top),
+                                                size = androidx.compose.ui.geometry.Size(w, h),
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                            )
+                                        }
+                                    }
+                                }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
                                     val dimW = strokeW(s, 3f, isHighlighted)
@@ -3007,6 +3115,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                 drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                             }
                                             ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                            ShapeKind.IMAGE -> drawRect(ghostColor, topLeft = Offset(minOf(sh.x1, sh.x2), minOf(sh.y1, sh.y2)), size = androidx.compose.ui.geometry.Size(abs(sh.x2 - sh.x1), abs(sh.y2 - sh.y1)), style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW))
                                             ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
                                             else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
                                         }
@@ -3040,6 +3149,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                     drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                                 }
                                                 ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                                ShapeKind.IMAGE -> drawRect(ghostColor, topLeft = Offset(minOf(sh.x1, sh.x2), minOf(sh.y1, sh.y2)), size = androidx.compose.ui.geometry.Size(abs(sh.x2 - sh.x1), abs(sh.y2 - sh.y1)), style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW))
                                                 ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
                                                 else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
                                             }
@@ -3064,6 +3174,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                 drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                             }
                                             ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                            ShapeKind.IMAGE -> drawRect(ghostColor, topLeft = Offset(minOf(sh.x1, sh.x2), minOf(sh.y1, sh.y2)), size = androidx.compose.ui.geometry.Size(abs(sh.x2 - sh.x1), abs(sh.y2 - sh.y1)), style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW))
                                             ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
                                             else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
                                         }
@@ -3572,6 +3683,35 @@ private fun PolarAngleDialog(initial: String, onConfirm: (Float) -> Unit, onCanc
     )
 }
 
+/** Shown when the "Insert picture" toolbar button is tapped — same three sources DxfHomeScreen's
+ *  own photo picker offers, just for dropping a picture onto the canvas as its own object instead
+ *  of as the whole drawing's trace-over background. */
+@Composable
+private fun ImageSourceDialog(onCamera: () -> Unit, onGallery: () -> Unit, onFile: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Insert picture") },
+        text = {
+            Column {
+                OutlinedButton(onClick = onCamera, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.PhotoCamera, "Camera", Modifier.padding(end = 6.dp))
+                    Text("Camera")
+                }
+                OutlinedButton(onClick = onGallery, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Icon(Icons.Filled.PhotoLibrary, "Gallery", Modifier.padding(end = 6.dp))
+                    Text("Gallery")
+                }
+                OutlinedButton(onClick = onFile, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Icon(Icons.Filled.UploadFile, "File", Modifier.padding(end = 6.dp))
+                    Text("File")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
 /** Asked right after a Box Select's traced boundary loop is confirmed closed (see
  *  SketchEditorScreen's Hatch action) — angle and spacing for the crosshatch fill, plus colour. */
 @Composable
@@ -3900,6 +4040,19 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                         TextButton(onClick = onDismiss) { Text("Cancel") }
                     }
                 }
+            )
+        }
+        // IMAGE's own label field holds its stored file path, not user-facing text — the generic
+        // LabelInputDialog below (used by every other kind) must never touch it, or editing/
+        // saving would silently corrupt the picture's file reference. Delete is all there is to
+        // offer here; move/scale/colour don't apply to a picture the way they do a line's colour.
+        ShapeKind.IMAGE -> {
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Picture") },
+                text = { Text("Move, copy, scale or delete it with Box Select, same as any other shape.") },
+                confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } },
+                dismissButton = { TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) } }
             )
         }
         else -> {
