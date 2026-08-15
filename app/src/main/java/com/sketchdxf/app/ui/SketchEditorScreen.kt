@@ -118,6 +118,7 @@ import com.sketchdxf.app.dxf.DxfWriter
 import com.sketchdxf.app.dxf.PendingSketchEditor
 import com.sketchdxf.app.dxf.PreviewRenderer
 import com.sketchdxf.app.dxf.SketchAttachmentStore
+import com.sketchdxf.app.ocr.OcrTextDialog
 import com.sketchdxf.app.ocr.rememberImageCamera
 import com.sketchdxf.app.ui.common.HandwriteInputDialog
 import kotlinx.coroutines.launch
@@ -438,6 +439,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var showImageSourceDialog by remember { mutableStateOf(false) }
     var pendingImagePath by remember { mutableStateOf<String?>(null) }
     var pendingImageAspect by remember { mutableStateOf<Float?>(null) }
+    // OCR Text: same source-picker step as Insert Image, but leads into OcrTextDialog (crop +
+    // recognize) instead of dropping the photo itself onto the canvas; pendingOcrText then
+    // prefills the normal Text tool's label dialog once the recognized text is confirmed, so the
+    // user still taps where it goes and can still edit font size/colour like any other label.
+    var showOcrSourceDialog by remember { mutableStateOf(false) }
+    var pendingOcrImagePath by remember { mutableStateOf<String?>(null) }
+    var pendingOcrText by remember { mutableStateOf<String?>(null) }
     val imageBitmapCache = remember { mutableMapOf<String, ImageBitmap?>() }
     fun bitmapForImagePath(path: String): ImageBitmap? {
         if (path.isBlank()) return null
@@ -486,6 +494,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         arcP1 = null; arcP2 = null
         distanceStart = null; pendingDistancePx = null
         pendingBlockInsert = null
+        pendingImagePath = null; pendingImageAspect = null
+        pendingOcrText = null
         lastWallInnerEnd = null; lastWallOuterIndex = -1
     }
 
@@ -1548,7 +1558,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     pendingTextPos?.let { pos ->
         LabelInputDialog(
             title = "Text label",
-            initial = "",
+            initial = pendingOcrText ?: "",
             showFontSize = true,
             unitLabel = unit,
             onConfirm = { text, _, fontSizeMm, _, _ ->
@@ -1556,9 +1566,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     pushUndo()
                     shapes.add(SketchShape(workId = 0, kind = ShapeKind.TEXT, x1 = pos.x, y1 = pos.y, label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm))
                 }
-                pendingTextPos = null
+                pendingTextPos = null; pendingOcrText = null
             },
-            onDismiss = { pendingTextPos = null }
+            onDismiss = { pendingTextPos = null; pendingOcrText = null }
         )
     }
     if (showRoomPlan) {
@@ -1814,6 +1824,28 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { showImageSourceDialog = false }
         )
     }
+    if (showOcrSourceDialog) {
+        ImageSourceDialog(
+            onCamera = { showOcrSourceDialog = false; ocrCamera() },
+            onGallery = {
+                showOcrSourceDialog = false
+                ocrGallery.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onFile = { showOcrSourceDialog = false; ocrFilePicker.launch(arrayOf("image/*")) },
+            onCancel = { showOcrSourceDialog = false }
+        )
+    }
+    pendingOcrImagePath?.let { path ->
+        OcrTextDialog(
+            imagePath = path,
+            onResult = { text ->
+                pendingOcrImagePath = null
+                pendingOcrText = text
+                tool = Tool.TEXT
+            },
+            onCancel = { pendingOcrImagePath = null }
+        )
+    }
     if (filletIndex1 >= 0 && filletIndex2 >= 0) {
         FilletRadiusDialog(
             error = filletError,
@@ -1892,6 +1924,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
     val imageFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         handleImagePicked(uri)
+    }
+
+    // OCR Text: same "pick a photo" step as Insert Image, but the copied file opens OcrTextDialog
+    // (drag a rectangle over the text, recognize, edit) instead of being dropped straight onto the
+    // canvas — see pendingOcrImagePath below.
+    fun handleOcrImagePicked(uri: Uri?) {
+        if (uri == null) return
+        pendingOcrImagePath = SketchAttachmentStore.copyIn(context, uri)?.path
+    }
+    val ocrCamera = rememberImageCamera { uri -> handleOcrImagePicked(uri) }
+    val ocrGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        handleOcrImagePicked(uri)
+    }
+    val ocrFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        handleOcrImagePicked(uri)
     }
 
     fun runCommand(raw: String) {
@@ -2069,6 +2116,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     label = { Text("Block") })
                 FilterChip(selected = tool == Tool.IMAGE, onClick = { showImageSourceDialog = true },
                     label = { Icon(Icons.Filled.Image, "Insert picture") })
+                FilterChip(selected = false, onClick = { showOcrSourceDialog = true }, label = { Text("OCR Text") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {

@@ -124,6 +124,10 @@ dependencies {
     // On-device handwriting recognition — for typing dimensions/labels by hand on the canvas.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
 
+    // On-device English (Latin script) text recognition — for OCR'ing a photographed dimension/
+    // label instead of typing it by hand. See OcrTextDialog.
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+
     // EXIF rotation, so a sideways photo detects lines right-side-up.
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
