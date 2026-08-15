@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.SketchBlock
 import com.sketchdxf.app.data.SketchBlockCodec
+import com.sketchdxf.app.data.StarterBlocks
 import com.sketchdxf.app.dxf.PreviewRenderer
 import kotlinx.coroutines.launch
 
@@ -70,6 +72,28 @@ fun BlockLibraryScreen(onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var category by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<SketchBlock?>(null) }
+    var addingStarters by remember { mutableStateOf(false) }
+
+    /** Seeds every StarterBlocks symbol not already present (matched by name), so tapping this
+     *  more than once never creates duplicates. */
+    fun addStarterBlocks() {
+        addingStarters = true
+        scope.launch {
+            val existingNames = blocks.map { it.name }.toSet()
+            StarterBlocks.all().forEach { (name, cat, shapes) ->
+                if (name !in existingNames) {
+                    dao.insertBlock(
+                        SketchBlock(
+                            name = name, category = cat, createdAt = System.currentTimeMillis(),
+                            shapesData = SketchBlockCodec.serialize(shapes), pxPerMm = 1f
+                        )
+                    )
+                }
+            }
+            blocks = dao.allBlocks()
+            addingStarters = false
+        }
+    }
 
     val categories = remember(blocks) { blocks.map { it.category }.distinct() }
     val filtered = remember(blocks, query, category) {
@@ -99,6 +123,11 @@ fun BlockLibraryScreen(onBack: () -> Unit) {
             TopAppBar(
                 title = { Text("Block library") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = {
+                    IconButton(onClick = { addStarterBlocks() }, enabled = !addingStarters) {
+                        Icon(Icons.Filled.Add, "Add starter symbols (doors, windows, lighting, camera, furniture, kitchen)")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
@@ -132,7 +161,7 @@ fun BlockLibraryScreen(onBack: () -> Unit) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         if (blocks.isEmpty())
-                            "No blocks saved yet — inside any drawing, select shapes with Box Select and tap \"Save Block\""
+                            "No blocks saved yet — tap + above for a starter set of doors, windows, lighting, camera, furniture and kitchen symbols, or inside any drawing select shapes with Box Select and tap \"Save Block\""
                         else "No blocks match",
                         color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(horizontal = 32.dp)
