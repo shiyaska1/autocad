@@ -273,6 +273,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // colour automatically, since .copy() only overrides fields explicitly passed to it.
     var currentColor by remember { mutableStateOf<Color?>(null) }
     var showColorPicker by remember { mutableStateOf(false) }
+    // Default line width (px) applied to newly-drawn shapes from now on, same idea as
+    // currentColor — 0f means "use this shape kind's usual default" (see strokeW). Changing an
+    // already-drawn shape's width instead uses either its own edit dialog or, for a whole Box
+    // Select selection at once, the "Width" action (see applyGroupWidth).
+    var currentStrokeWidth by remember { mutableStateOf(0f) }
+    var showWidthPicker by remember { mutableStateOf(false) }
     // Fullscreen canvas: hides the toolbars/command line so the drawing area fills the screen; a
     // corner button (drawn over the canvas itself, since the top bar is hidden too) exits back.
     var fullscreenCanvas by remember { mutableStateOf(false) }
@@ -972,7 +978,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         pushUndo()
         val firstIndex = shapes.size
         simplified.zipWithNext { a, b ->
-            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y, color = currentColor?.toArgb()))
+            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth))
         }
         val newIndices = firstIndex until shapes.size
         val levelThreshold = kotlin.math.sin(Math.toRadians(20.0)).toFloat()
@@ -1045,7 +1051,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             workId = 0, kind = ShapeKind.LINE,
             x1 = inner.x1 + nx * thickPx, y1 = inner.y1 + ny * thickPx,
             x2 = inner.x2 + nx * thickPx, y2 = inner.y2 + ny * thickPx,
-            color = currentColor?.toArgb()
+            color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
         )
         val prevEnd = lastWallInnerEnd; val prevIdx = lastWallOuterIndex
         if (prevEnd != null && prevIdx in shapes.indices && hypotF(inner.x1 - prevEnd.x, inner.y1 - prevEnd.y) < 2f) {
@@ -1276,7 +1282,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
         fun ln(a: Offset, b: Offset, realLen: Double) = SketchShape(
             workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y,
-            realLength = realLen.coerceAtLeast(0.0), confirmed = true, color = currentColor?.toArgb()
+            realLength = realLen.coerceAtLeast(0.0), confirmed = true, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
         )
         val innerLen = (lengthMm - 2 * wallMm).coerceAtLeast(0.0)
         val innerWid = (widthMm - 2 * wallMm).coerceAtLeast(0.0)
@@ -1336,7 +1342,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val a = canvasPoints[i]; val b = canvasPoints[i + 1]
             newShapes.add(
                 SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y,
-                    realLength = segs[i].value, confirmed = true, color = currentColor?.toArgb())
+                    realLength = segs[i].value, confirmed = true, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth)
             )
             val seg = b - a
             val len = hypotF(seg.x, seg.y)
@@ -1345,7 +1351,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val n = Offset(-d.y, d.x) // inward normal, for a clockwise R/B/L/T-ordered wall walk
             val innerA = Offset(a.x + wallPx * (n.x - d.x), a.y + wallPx * (n.y - d.y))
             val innerB = Offset(b.x + wallPx * (n.x + d.x), b.y + wallPx * (n.y + d.y))
-            newShapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = innerA.x, y1 = innerA.y, x2 = innerB.x, y2 = innerB.y, color = currentColor?.toArgb()))
+            newShapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = innerA.x, y1 = innerA.y, x2 = innerB.x, y2 = innerB.y, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth))
         }
         pushUndo()
         shapes.addAll(newShapes)
@@ -1676,7 +1682,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 shapes.add(
                     SketchShape(
                         workId = 0, kind = ShapeKind.DIMENSION, x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y,
-                        label = text, color = currentColor?.toArgb(), fontSize = fontSizeMm, dimOffset = offsetPx
+                        label = text, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth, fontSize = fontSizeMm, dimOffset = offsetPx
                     )
                 )
                 pendingDimension = null
@@ -1812,6 +1818,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             current = currentColor,
             onPick = { currentColor = it },
             onDismiss = { showColorPicker = false }
+        )
+    }
+    if (showWidthPicker) {
+        CurrentWidthDialog(
+            initial = currentStrokeWidth,
+            onConfirm = { w -> currentStrokeWidth = w; showWidthPicker = false },
+            onCancel = { showWidthPicker = false }
         )
     }
 
@@ -2004,6 +2017,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             Text("Colour", modifier = Modifier.padding(start = 6.dp))
                         }
                     }
+                )
+                FilterChip(
+                    selected = false, onClick = { showWidthPicker = true },
+                    label = { Text(if (currentStrokeWidth > 0f) "Width: ${trimNum(currentStrokeWidth.toDouble())}px" else "Width") }
                 )
             }
             if (tool == Tool.BOX_SELECT && selectedIndices.isNotEmpty()) {
@@ -2334,7 +2351,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             val len = hypotF(c.x - s.x, c.y - s.y)
                                             if (len > 12f) {
                                                 pushUndo()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len, color = currentColor?.toArgb()))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.CIRCLE, cx = s.x, cy = s.y, r = len, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth))
                                             }
                                         }
                                         dragStart = null; dragCurrent = null
@@ -2351,10 +2368,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                 pushUndo()
                                                 val p2 = Offset(c.x, s.y); val p4 = Offset(s.x, c.y)
                                                 val rectColor = currentColor?.toArgb()
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y, color = rectColor))
-                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y, color = rectColor))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = s.x, y1 = s.y, x2 = p2.x, y2 = p2.y, color = rectColor, strokeWidth = currentStrokeWidth))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p2.x, y1 = p2.y, x2 = c.x, y2 = c.y, color = rectColor, strokeWidth = currentStrokeWidth))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = c.x, y1 = c.y, x2 = p4.x, y2 = p4.y, color = rectColor, strokeWidth = currentStrokeWidth))
+                                                shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = p4.x, y1 = p4.y, x2 = s.x, y2 = s.y, color = rectColor, strokeWidth = currentStrokeWidth))
                                             }
                                         }
                                         dragStart = null; dragCurrent = null
@@ -2373,7 +2390,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                         if (hypotF(end.x - start.x, end.y - start.y) > 4f) {
                                             pushUndo()
-                                            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false, color = currentColor?.toArgb()))
+                                            shapes.add(SketchShape(workId = 0, kind = ShapeKind.LINE, x1 = start.x, y1 = start.y, x2 = end.x, y2 = end.y, confirmed = false, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth))
                                             pendingLengthIndex = shapes.lastIndex
                                             lineStartPoint = if (chainOn) end else null
                                         }
@@ -2416,7 +2433,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                     SketchShape(
                                                         workId = 0, kind = ShapeKind.ARC, cx = cx, cy = cy, r = r,
                                                         x1 = p1.x, y1 = p1.y, x2 = snapped.x, y2 = snapped.y,
-                                                        major = major, color = currentColor?.toArgb()
+                                                        major = major, color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
                                                     )
                                                 )
                                             }
@@ -2433,7 +2450,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             x1 = anchor.x, y1 = anchor.y,
                                             x2 = anchor.x + if (xlineHorizontal) 1f else 0f,
                                             y2 = anchor.y + if (xlineHorizontal) 0f else 1f,
-                                            color = currentColor?.toArgb()
+                                            color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
                                         )
                                     )
                                 })
@@ -2542,7 +2559,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                     SketchShape(
                                                         workId = 0, kind = ShapeKind.FREEHAND,
                                                         path = SketchPath.serialize(freehandPoints.map { it.x to it.y }),
-                                                        color = currentColor?.toArgb()
+                                                        color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
                                                     )
                                                 )
                                             }
@@ -3443,6 +3460,44 @@ private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -
                 val v = text.toFloatOrNull()
                 if (v == null || v <= 0f) error = "Enter a valid width" else onConfirm(v)
             }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** Sets [SketchEditorScreen]'s currentStrokeWidth — the default width new shapes are drawn with
+ *  from now on, same idea as the colour picker. Leaving it blank (or clearing it) goes back to
+ *  0f, meaning "each shape kind's own usual default" rather than a fixed override. */
+@Composable
+private fun CurrentWidthDialog(initial: Float, onConfirm: (Float) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf(if (initial > 0f) trimNum(initial.toDouble()) else "") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Default line width") },
+        text = {
+            Column {
+                Text(
+                    "Applied to new lines, circles, arcs and dimensions you draw from now on. Leave blank for each shape's usual default. To change shapes you've already drawn, select them with Box Select and use its own Width action instead.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Width (px)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (text.isBlank()) onConfirm(0f)
+                else {
+                    val v = text.toFloatOrNull()
+                    if (v == null || v <= 0f) error = "Enter a valid width, or leave it blank for the default" else onConfirm(v)
+                }
+            }) { Text("Set") }
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
