@@ -372,7 +372,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var rotateBasePoint by remember { mutableStateOf<Offset?>(null) }
     var rotateDragStart by remember { mutableStateOf<Offset?>(null) }
     var rotateDragCurrent by remember { mutableStateOf<Offset?>(null) }
-    // Mirror (Box Select action): armed by its own button, then two taps place the mirror line —
+    // Mirror (Box Select action): armed by its own button, then a tap plus a drag place the
+    // mirror line — always horizontal or vertical through the tapped point, no freehand angle —
     // the selection is reflected across it, originals kept (like Copy), matching AutoCAD MIRROR's
     // default "erase source objects? No".
     var mirrorModeActive by remember { mutableStateOf(false) }
@@ -1926,6 +1927,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     if (busy) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Filled.Save, "Save")
                 }
+                // Box Select leads the tool row — it's the hub for Move/Copy/Scale/Rotate/Mirror/
+                // Hatch/Delete/Save Block and more, so it's the tool reached for most often.
+                FilterChip(selected = tool == Tool.BOX_SELECT, onClick = {
+                    tool = Tool.BOX_SELECT; resetToolState()
+                }, label = { Text("Select") })
                 FilterChip(selected = tool == Tool.SELECT, onClick = {
                     tool = Tool.SELECT; resetToolState()
                 }, label = { Icon(Icons.Filled.NearMe, "Select") })
@@ -1973,9 +1979,6 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.FREEHAND, onClick = {
                     tool = Tool.FREEHAND; resetToolState()
                 }, label = { Text("Pencil") })
-                FilterChip(selected = tool == Tool.BOX_SELECT, onClick = {
-                    tool = Tool.BOX_SELECT; resetToolState()
-                }, label = { Text("Select") })
                 FilterChip(selected = tool == Tool.BREAK, onClick = {
                     tool = Tool.BREAK; resetToolState()
                 }, label = { Text("Break") })
@@ -2587,9 +2590,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // start; once set, the branch below places the end and commits.
                                     detectTapGestures(onTap = { p -> mirrorPoint1 = trySnapPoint(p) })
                                 } else if (mirrorModeActive) {
+                                    // The mirror line is always horizontal or vertical through the
+                                    // first point (whichever the drag is closer to) — a diagonal
+                                    // mirror is rarely what's wanted for floor-plan symmetry, so
+                                    // this skips a freehand-angle step rather than requiring one.
                                     detectDragGestures(
-                                        onDragStart = { p -> mirrorDragCurrent = p },
-                                        onDrag = { p -> mirrorDragCurrent = p },
+                                        onDragStart = { p -> mirrorDragCurrent = mirrorPoint1?.let { orthoProject(it, p) } ?: p },
+                                        onDrag = { p -> mirrorDragCurrent = mirrorPoint1?.let { orthoProject(it, p) } ?: p },
                                         onDragEnd = {
                                             val p1 = mirrorPoint1; val p2 = mirrorDragCurrent
                                             if (p1 != null && p2 != null && hypotF(p2.x - p1.x, p2.y - p1.y) > 2f) {
