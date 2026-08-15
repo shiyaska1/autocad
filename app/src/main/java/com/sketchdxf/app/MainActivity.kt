@@ -23,6 +23,9 @@ import com.sketchdxf.app.ui.DxfHomeScreen
 import com.sketchdxf.app.ui.DxfListScreen
 import com.sketchdxf.app.ui.ForceUpdateScreen
 import com.sketchdxf.app.ui.LicenseScreen
+import com.sketchdxf.app.ui.PdfMergeScreen
+import com.sketchdxf.app.ui.PdfSplitScreen
+import com.sketchdxf.app.ui.PdfToolsScreen
 import com.sketchdxf.app.ui.SketchEditorScreen
 import com.sketchdxf.app.update.AppUpdater
 
@@ -77,7 +80,8 @@ private fun SketchDxfApp() {
                 onNew = { nav.navigate("new") },
                 onOpen = { id -> nav.navigate("detail/$id") },
                 onBlocks = { nav.navigate("blocks") },
-                onBackup = { nav.navigate("backup") }
+                onBackup = { nav.navigate("backup") },
+                onPdfTools = { nav.navigate("pdf_tools") }
             )
         }
         composable("blocks") {
@@ -85,6 +89,19 @@ private fun SketchDxfApp() {
         }
         composable("backup") {
             BackupScreen(onBack = { nav.popBackStack() })
+        }
+        composable("pdf_tools") {
+            PdfToolsScreen(
+                onBack = { nav.popBackStack() },
+                onSplit = { nav.navigate("pdf_split") },
+                onMerge = { nav.navigate("pdf_merge") }
+            )
+        }
+        composable("pdf_split") {
+            PdfSplitScreen(onBack = { nav.popBackStack() })
+        }
+        composable("pdf_merge") {
+            PdfMergeScreen(onBack = { nav.popBackStack() })
         }
         composable("new") {
             DxfHomeScreen(

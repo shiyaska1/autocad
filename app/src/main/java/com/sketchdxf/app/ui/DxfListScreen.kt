@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material3.AlertDialog
@@ -59,7 +60,7 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit, onBlocks: () -> Unit, onBackup: () -> Unit) {
+fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit, onBlocks: () -> Unit, onBackup: () -> Unit, onPdfTools: () -> Unit) {
     val context = LocalContext.current
     val dao = remember { AppDatabase.get(context).sketchDao() }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -110,6 +111,7 @@ fun DxfListScreen(onBack: () -> Unit, onNew: () -> Unit, onOpen: (Long) -> Unit,
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
                     IconButton(onClick = onBlocks) { Icon(Icons.Filled.Category, "Block library") }
+                    IconButton(onClick = onPdfTools) { Icon(Icons.Filled.PictureAsPdf, "PDF tools (split/merge)") }
                     IconButton(onClick = onBackup) { Icon(Icons.Filled.SettingsBackupRestore, "Backup & Restore") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
