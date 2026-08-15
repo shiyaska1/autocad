@@ -2956,9 +2956,6 @@ private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -
     )
 }
 
-/** Asked once each time Wall mode is switched on: every LINE drawn from then on gets a second,
- *  parallel outside-face line at this thickness — see SketchEditorScreen's addWallOuterLine. */
-@Composable
 @Composable
 private fun PolarAngleDialog(initial: String, onConfirm: (Float) -> Unit, onCancel: () -> Unit) {
     var text by remember { mutableStateOf(initial) }
@@ -2991,6 +2988,9 @@ private fun PolarAngleDialog(initial: String, onConfirm: (Float) -> Unit, onCanc
     )
 }
 
+/** Asked once each time Wall mode is switched on: every LINE drawn from then on gets a second,
+ *  parallel outside-face line at this thickness — see SketchEditorScreen's addWallOuterLine. */
+@Composable
 private fun WallThicknessDialog(initial: String, unitLabel: String, onConfirm: (String) -> Unit, onCancel: () -> Unit) {
     var text by remember { mutableStateOf(initial) }
     var error by remember { mutableStateOf<String?>(null) }
