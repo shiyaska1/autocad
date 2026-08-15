@@ -364,6 +364,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // loop (see traceClosedPolygon) — on success a dialog asks for angle/spacing/colour, on
     // failure commandFeedback explains why (not a closed loop of plain lines).
     var pendingHatchBoundary by remember { mutableStateOf<List<Offset>?>(null) }
+    // Rotate (Box Select action): armed by its own button, then one tap picks the base point, then
+    // a drag "twists" the selection around it — the angle from the base to where the drag started
+    // is the 0° reference, so the rotation is just how far the finger has swung from there since,
+    // snapped to 90° (Ortho) or the Polar increment when either is on, freehand otherwise.
+    var rotateModeActive by remember { mutableStateOf(false) }
+    var rotateBasePoint by remember { mutableStateOf<Offset?>(null) }
+    var rotateDragStart by remember { mutableStateOf<Offset?>(null) }
+    var rotateDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    // Mirror (Box Select action): armed by its own button, then two taps place the mirror line —
+    // the selection is reflected across it, originals kept (like Copy), matching AutoCAD MIRROR's
+    // default "erase source objects? No".
+    var mirrorModeActive by remember { mutableStateOf(false) }
+    var mirrorPoint1 by remember { mutableStateOf<Offset?>(null) }
+    var mirrorDragCurrent by remember { mutableStateOf<Offset?>(null) }
     // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
     // would land on — shown as a highlight, and used as the actual drop point on release.
     var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
@@ -431,6 +445,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         moveModeActive = false; copyModeActive = false
         moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
         scaleModeActive = false; scaleBasePoint = null
+        pendingHatchBoundary = null
+        rotateModeActive = false; rotateBasePoint = null; rotateDragStart = null; rotateDragCurrent = null
+        mirrorModeActive = false; mirrorPoint1 = null; mirrorDragCurrent = null
         gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
         breakLineIndex = -1; breakPoint1 = null
         filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
@@ -740,6 +757,73 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         )
         ShapeKind.ARC -> s.copy(cx = s.cx * f, cy = s.cy * f, r = s.r * f, x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
         else -> s.copy(x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
+    }
+
+    /** Rotates a shape's geometry by [angleRad] (radians, positive = counter-clockwise in
+     *  math/atan2 convention) around the pivot ([px],[py]). Same "which fields are actually a
+     *  point" concerns as [scaleShape]: a HATCH's boundary path rotates, and its stored angle
+     *  (x1) turns with it so the fill lines keep following the shape instead of staying fixed to
+     *  the world; its spacing (y1) is untouched since rotation doesn't change distances. */
+    fun rotateShape(s: SketchShape, angleRad: Float, px: Float, py: Float): SketchShape {
+        val cosT = cos(angleRad); val sinT = sin(angleRad)
+        fun rot(x: Float, y: Float): Pair<Float, Float> {
+            val dx = x - px; val dy = y - py
+            return (px + dx * cosT - dy * sinT) to (py + dx * sinT + dy * cosT)
+        }
+        return when (s.kind) {
+            ShapeKind.CIRCLE -> rot(s.cx, s.cy).let { (x, y) -> s.copy(cx = x, cy = y) }
+            ShapeKind.TEXT -> rot(s.x1, s.y1).let { (x, y) -> s.copy(x1 = x, y1 = y) }
+            ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> rot(x, y) }))
+            ShapeKind.HATCH -> s.copy(
+                path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> rot(x, y) }),
+                x1 = s.x1 + Math.toDegrees(angleRad.toDouble()).toFloat()
+            )
+            ShapeKind.ARC -> {
+                val (ccx, ccy) = rot(s.cx, s.cy); val (ax1, ay1) = rot(s.x1, s.y1); val (ax2, ay2) = rot(s.x2, s.y2)
+                s.copy(cx = ccx, cy = ccy, x1 = ax1, y1 = ay1, x2 = ax2, y2 = ay2)
+            }
+            else -> {
+                val (ax1, ay1) = rot(s.x1, s.y1); val (ax2, ay2) = rot(s.x2, s.y2)
+                s.copy(x1 = ax1, y1 = ay1, x2 = ax2, y2 = ay2)
+            }
+        }
+    }
+
+    /** Reflects a shape's geometry across the line through ([ax],[ay])-([bx],[by]) — standard
+     *  point reflection (project onto the line, then go the same distance the other side of it).
+     *  A HATCH's fill angle mirrors too (a direction at angle θ reflects to 2×mirrorAngle − θ), an
+     *  ARC's minor/major-arc selection ([SketchShape.major]) needs no change since reflection
+     *  preserves which of the two arcs between two points is the shorter one. */
+    fun mirrorShape(s: SketchShape, ax: Float, ay: Float, bx: Float, by: Float): SketchShape {
+        val dx = bx - ax; val dy = by - ay
+        val len2 = dx * dx + dy * dy
+        if (len2 < 1e-6f) return s
+        fun refl(x: Float, y: Float): Pair<Float, Float> {
+            val px = x - ax; val py = y - ay
+            val t = (px * dx + py * dy) / len2
+            val projX = t * dx; val projY = t * dy
+            return (ax + 2f * projX - px) to (ay + 2f * projY - py)
+        }
+        return when (s.kind) {
+            ShapeKind.CIRCLE -> refl(s.cx, s.cy).let { (x, y) -> s.copy(cx = x, cy = y) }
+            ShapeKind.TEXT -> refl(s.x1, s.y1).let { (x, y) -> s.copy(x1 = x, y1 = y) }
+            ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> refl(x, y) }))
+            ShapeKind.HATCH -> {
+                val mirrorAngleDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+                s.copy(
+                    path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> refl(x, y) }),
+                    x1 = 2f * mirrorAngleDeg - s.x1
+                )
+            }
+            ShapeKind.ARC -> {
+                val (ccx, ccy) = refl(s.cx, s.cy); val (ax1, ay1) = refl(s.x1, s.y1); val (ax2, ay2) = refl(s.x2, s.y2)
+                s.copy(cx = ccx, cy = ccy, x1 = ax1, y1 = ay1, x2 = ax2, y2 = ay2)
+            }
+            else -> {
+                val (rx1, ry1) = refl(s.x1, s.y1); val (rx2, ry2) = refl(s.x2, s.y2)
+                s.copy(x1 = rx1, y1 = ry1, x2 = rx2, y2 = ry2)
+            }
+        }
     }
 
     /** Chains a Box Select of LINE shapes end-to-end into a closed boundary polygon for Hatch —
@@ -1928,21 +2012,39 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Text("${selectedIndices.size} selected", style = MaterialTheme.typography.bodySmall)
                     FilterChip(
                         selected = moveModeActive,
-                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) { copyModeActive = false; scaleModeActive = false } },
+                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) { copyModeActive = false; scaleModeActive = false; rotateModeActive = false; mirrorModeActive = false } },
                         label = { Text("Move") }
                     )
                     FilterChip(
                         selected = copyModeActive,
-                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) { moveModeActive = false; scaleModeActive = false } },
+                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) { moveModeActive = false; scaleModeActive = false; rotateModeActive = false; mirrorModeActive = false } },
                         label = { Text("Copy") }
                     )
                     FilterChip(
                         selected = scaleModeActive,
                         onClick = {
                             scaleModeActive = !scaleModeActive
-                            if (scaleModeActive) { moveModeActive = false; copyModeActive = false } else scaleBasePoint = null
+                            if (scaleModeActive) { moveModeActive = false; copyModeActive = false; rotateModeActive = false; mirrorModeActive = false } else scaleBasePoint = null
                         },
                         label = { Text("Scale") }
+                    )
+                    FilterChip(
+                        selected = rotateModeActive,
+                        onClick = {
+                            rotateModeActive = !rotateModeActive
+                            if (rotateModeActive) { moveModeActive = false; copyModeActive = false; scaleModeActive = false; mirrorModeActive = false }
+                            else { rotateBasePoint = null; rotateDragStart = null; rotateDragCurrent = null }
+                        },
+                        label = { Text("Rotate") }
+                    )
+                    FilterChip(
+                        selected = mirrorModeActive,
+                        onClick = {
+                            mirrorModeActive = !mirrorModeActive
+                            if (mirrorModeActive) { moveModeActive = false; copyModeActive = false; scaleModeActive = false; rotateModeActive = false }
+                            else { mirrorPoint1 = null; mirrorDragCurrent = null }
+                        },
+                        label = { Text("Mirror") }
                     )
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
@@ -1973,9 +2075,25 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
                     FilterChip(
                         selected = false,
-                        onClick = { selectedIndices.clear(); moveModeActive = false; copyModeActive = false },
+                        onClick = {
+                            selectedIndices.clear(); moveModeActive = false; copyModeActive = false
+                            scaleModeActive = false; scaleBasePoint = null
+                            rotateModeActive = false; rotateBasePoint = null; rotateDragStart = null; rotateDragCurrent = null
+                            mirrorModeActive = false; mirrorPoint1 = null; mirrorDragCurrent = null
+                        },
                         label = { Text("Clear") }
                     )
+                }
+            }
+            if (tool == Tool.BOX_SELECT && rotateModeActive) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        if (rotateBasePoint == null) "Tap the point to rotate around" else "Drag anywhere to twist the selection, then release",
+                        style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 4.dp)
+                    )
+                    FilterChip(selected = orthoOn, onClick = { orthoOn = !orthoOn }, label = { Text("Ortho") })
+                    FilterChip(selected = polarOn, onClick = { polarOn = !polarOn }, label = { Text("Polar") })
+                    TextButton(onClick = { showPolarAngleDialog = true }) { Text("${trimNum(polarAngleDeg.toDouble())}°") }
                 }
             }
             if (tool == Tool.LINE || tool == Tool.RECTANGLE || tool == Tool.DIMENSION || tool == Tool.STRETCH) {
@@ -2066,6 +2184,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
                     tool == Tool.BOX_SELECT && scaleModeActive -> "Tap the point the selection should scale around"
+                    tool == Tool.BOX_SELECT && rotateModeActive && rotateBasePoint == null -> "Tap the point to rotate around"
+                    tool == Tool.BOX_SELECT && rotateModeActive -> "Drag anywhere to twist the selection, then release"
+                    tool == Tool.BOX_SELECT && mirrorModeActive && mirrorPoint1 == null -> "Tap the mirror line's start point"
+                    tool == Tool.BOX_SELECT && mirrorModeActive -> "Drag to the mirror line's end point, then release"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -2195,7 +2317,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
                     Canvas(
-                        Modifier.fillMaxSize().pointerInput(tool, orthoOn, snapOn, moveModeActive, copyModeActive, stretchArmed) {
+                        Modifier.fillMaxSize().pointerInput(
+                            tool, orthoOn, polarOn, snapOn, moveModeActive, copyModeActive, stretchArmed,
+                            rotateModeActive, rotateBasePoint != null, mirrorModeActive, mirrorPoint1 != null
+                        ) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
@@ -2426,6 +2551,56 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // Armed by the Scale action: one tap picks the base point the
                                     // selection scales around (a dialog then asks for the factor).
                                     detectTapGestures(onTap = { p -> scaleBasePoint = trySnapPoint(p) })
+                                } else if (rotateModeActive && rotateBasePoint == null) {
+                                    // Armed by the Rotate action: first tap picks the pivot; once set,
+                                    // the branch below takes over for the actual twist-to-rotate drag.
+                                    detectTapGestures(onTap = { p -> rotateBasePoint = trySnapPoint(p) })
+                                } else if (rotateModeActive) {
+                                    // The angle from the pivot to wherever this drag STARTS is the 0°
+                                    // reference, so rotation is purely how far the finger has swung
+                                    // since — snapped to 90° (Ortho) or the Polar increment when
+                                    // either is on, freehand otherwise, same relationship Line/Stretch
+                                    // already have between Ortho and Polar.
+                                    detectDragGestures(
+                                        onDragStart = { p -> rotateDragStart = p; rotateDragCurrent = p },
+                                        onDrag = { p -> rotateDragCurrent = p },
+                                        onDragEnd = {
+                                            val base = rotateBasePoint; val s = rotateDragStart; val c = rotateDragCurrent
+                                            if (base != null && s != null && c != null) {
+                                                val a0 = Math.toDegrees(atan2((s.y - base.y).toDouble(), (s.x - base.x).toDouble()))
+                                                val a1 = Math.toDegrees(atan2((c.y - base.y).toDouble(), (c.x - base.x).toDouble()))
+                                                var deltaDeg = (a1 - a0).toFloat()
+                                                if (orthoOn) deltaDeg = Math.round(deltaDeg / 90f) * 90f
+                                                else if (polarOn) deltaDeg = Math.round(deltaDeg / polarAngleDeg) * polarAngleDeg
+                                                if (abs(deltaDeg) > 0.5f) {
+                                                    pushUndo()
+                                                    val rad = Math.toRadians(deltaDeg.toDouble()).toFloat()
+                                                    selectedIndices.forEach { idx -> shapes[idx] = rotateShape(shapes[idx], rad, base.x, base.y) }
+                                                }
+                                            }
+                                            rotateDragStart = null; rotateDragCurrent = null
+                                            rotateBasePoint = null; rotateModeActive = false
+                                        }
+                                    )
+                                } else if (mirrorModeActive && mirrorPoint1 == null) {
+                                    // Armed by the Mirror action: first tap places the mirror line's
+                                    // start; once set, the branch below places the end and commits.
+                                    detectTapGestures(onTap = { p -> mirrorPoint1 = trySnapPoint(p) })
+                                } else if (mirrorModeActive) {
+                                    detectDragGestures(
+                                        onDragStart = { p -> mirrorDragCurrent = p },
+                                        onDrag = { p -> mirrorDragCurrent = p },
+                                        onDragEnd = {
+                                            val p1 = mirrorPoint1; val p2 = mirrorDragCurrent
+                                            if (p1 != null && p2 != null && hypotF(p2.x - p1.x, p2.y - p1.y) > 2f) {
+                                                pushUndo()
+                                                val mirrored = selectedIndices.sorted().map { mirrorShape(shapes[it], p1.x, p1.y, p2.x, p2.y) }
+                                                selectedIndices.clear()
+                                                mirrored.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+                                            }
+                                            mirrorPoint1 = null; mirrorDragCurrent = null; mirrorModeActive = false
+                                        }
+                                    )
                                 } else if (moveModeActive || copyModeActive) {
                                     // Armed by the Move or Copy action: this drag supplies the placement —
                                     // Move translates the selection, Copy leaves the originals and adds
@@ -2801,7 +2976,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                                 ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy),
                                                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW)
                                             )
-                                            ShapeKind.FREEHAND, ShapeKind.POLYLINE -> SketchPath.parse(sh.path).zipWithNext { a, b ->
+                                            ShapeKind.FREEHAND, ShapeKind.POLYLINE, ShapeKind.HATCH -> SketchPath.parse(sh.path).zipWithNext { a, b ->
                                                 drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
                                             }
                                             ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
@@ -2815,6 +2990,67 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     drawCircle(
                                         Color(0xFFE65100), radius = maxOf(11f, minPx(5f)), center = p,
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f))
+                                    )
+                                }
+                            } else if (rotateModeActive) {
+                                val base = rotateBasePoint
+                                if (base != null) {
+                                    drawCircle(Color(0xFF6A1B9A), radius = maxOf(8f, minPx(4f)), center = base, style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f)))
+                                    val s2 = rotateDragStart; val c2 = rotateDragCurrent
+                                    if (s2 != null && c2 != null) {
+                                        val a0 = Math.toDegrees(atan2((s2.y - base.y).toDouble(), (s2.x - base.x).toDouble()))
+                                        val a1 = Math.toDegrees(atan2((c2.y - base.y).toDouble(), (c2.x - base.x).toDouble()))
+                                        var deltaDeg = (a1 - a0).toFloat()
+                                        if (orthoOn) deltaDeg = Math.round(deltaDeg / 90f) * 90f
+                                        else if (polarOn) deltaDeg = Math.round(deltaDeg / polarAngleDeg) * polarAngleDeg
+                                        val rad = Math.toRadians(deltaDeg.toDouble()).toFloat()
+                                        val ghostColor = Color.Gray; val ghostW = minPx(4f)
+                                        selectedIndices.forEach { idx ->
+                                            val sh = rotateShape(shapes[idx], rad, base.x, base.y)
+                                            when (sh.kind) {
+                                                ShapeKind.CIRCLE -> drawCircle(ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW))
+                                                ShapeKind.FREEHAND, ShapeKind.POLYLINE, ShapeKind.HATCH -> SketchPath.parse(sh.path).zipWithNext { a, b ->
+                                                    drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
+                                                }
+                                                ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                                ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
+                                                else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
+                                            }
+                                        }
+                                        // Rubber-band reference (dashed, to dragStart) and live (solid, to dragCurrent) lines.
+                                        drawLine(Color(0xFF6A1B9A), base, s2, strokeWidth = minPx(1.5f), pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(10f, 6f)))
+                                        drawLine(Color(0xFF6A1B9A), base, c2, strokeWidth = minPx(1.5f))
+                                    }
+                                }
+                            } else if (mirrorModeActive) {
+                                val p1 = mirrorPoint1; val p2 = mirrorDragCurrent
+                                if (p1 != null) {
+                                    drawCircle(Color(0xFF6A1B9A), radius = maxOf(8f, minPx(4f)), center = p1, style = androidx.compose.ui.graphics.drawscope.Stroke(width = minPx(2f)))
+                                }
+                                if (p1 != null && p2 != null) {
+                                    val ghostColor = Color(0xFF2E7D32); val ghostW = minPx(4f)
+                                    selectedIndices.forEach { idx ->
+                                        val sh = mirrorShape(shapes[idx], p1.x, p1.y, p2.x, p2.y)
+                                        when (sh.kind) {
+                                            ShapeKind.CIRCLE -> drawCircle(ghostColor, radius = sh.r, center = Offset(sh.cx, sh.cy), style = androidx.compose.ui.graphics.drawscope.Stroke(width = ghostW))
+                                            ShapeKind.FREEHAND, ShapeKind.POLYLINE, ShapeKind.HATCH -> SketchPath.parse(sh.path).zipWithNext { a, b ->
+                                                drawLine(ghostColor, Offset(a.first, a.second), Offset(b.first, b.second), strokeWidth = ghostW)
+                                            }
+                                            ShapeKind.ARC -> arcPoints(sh).zipWithNext { a, b -> drawLine(ghostColor, a, b, strokeWidth = ghostW) }
+                                            ShapeKind.TEXT -> drawCircle(ghostColor, radius = maxOf(6f, minPx(3f)), center = Offset(sh.x1, sh.y1))
+                                            else -> drawLine(ghostColor, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2), strokeWidth = ghostW)
+                                        }
+                                    }
+                                    // The mirror line itself, extended slightly past the two tapped points.
+                                    val dx = p2.x - p1.x; val dy = p2.y - p1.y
+                                    val ext = 40f
+                                    val len = hypotF(dx, dy).coerceAtLeast(1f)
+                                    drawLine(
+                                        Color(0xFF6A1B9A),
+                                        Offset(p1.x - dx / len * ext, p1.y - dy / len * ext),
+                                        Offset(p2.x + dx / len * ext, p2.y + dy / len * ext),
+                                        strokeWidth = minPx(1.5f),
+                                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(10f, 6f))
                                     )
                                 }
                             } else {
