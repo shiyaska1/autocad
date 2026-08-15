@@ -162,7 +162,7 @@ private suspend fun PointerInputScope.detectPanOrZoom(requireTwoFingers: Boolean
     }
 }
 
-private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK }
+private enum class Tool { SELECT, LINE, RECTANGLE, CIRCLE, TEXT, DIMENSION, OFFSET, TRIM, PAN, FREEHAND, BOX_SELECT, BREAK, FILLET, STRETCH, EXTEND, ARC, DISTANCE, BLOCK, XLINE }
 
 /** One endpoint captured by a Stretch crossing-selection: [part] 0 = a shape's primary point
  *  (x1,y1 for LINE/DIMENSION/TEXT, cx,cy for CIRCLE), 1 = a LINE/DIMENSION's other end (x2,y2). */
@@ -304,6 +304,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // offset/size a manually-placed one gets), so a drawn wall/edge always carries its own
     // length label without a separate trip to the Dimension tool.
     var autoDimOn by remember { mutableStateOf(false) }
+    // AutoCAD-style XLINE (construction line): true = horizontal, false = vertical.
+    var xlineHorizontal by remember { mutableStateOf(true) }
     // Wall mode: each LINE drawn is treated as a wall's inside face — a second, parallel line is
     // auto-added on the outside at the given thickness. Chained (connected) wall segments have
     // their outside lines mitered to meet exactly at the corner instead of gapping/overlapping.
@@ -353,6 +355,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var copyModeActive by remember { mutableStateOf(false) }
     var moveDragStart by remember { mutableStateOf<Offset?>(null) }
     var moveDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    // Scale (Box Select action): armed by its own button, then one tap picks the base point the
+    // selection scales around, and a dialog asks for the factor (2 = double size, 0.5 = half).
+    var scaleModeActive by remember { mutableStateOf(false) }
+    var scaleBasePoint by remember { mutableStateOf<Offset?>(null) }
     // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
     // would land on — shown as a highlight, and used as the actual drop point on release.
     var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
@@ -419,6 +425,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         selectDragStart = null; selectDragCurrent = null
         moveModeActive = false; copyModeActive = false
         moveDragStart = null; moveDragCurrent = null; moveSnapTarget = null
+        scaleModeActive = false; scaleBasePoint = null
         gripDragIndex = -1; gripDragPart = 0; selectTapStart = null
         breakLineIndex = -1; breakPoint1 = null
         filletIndex1 = -1; filletIndex2 = -1; filletTap1 = null; filletTap2 = null; filletError = null
@@ -498,11 +505,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         )
     }
 
+    /** Perpendicular distance from [p] to the UNBOUNDED line through [a] in direction [dir] (must
+     *  already be a unit vector) — unlike [distToSegment], never clamps to an endpoint, since an
+     *  XLINE has none. */
+    fun distToInfiniteLine(p: Offset, a: Offset, dir: Offset): Float =
+        abs((p.x - a.x) * dir.y - (p.y - a.y) * dir.x)
+
     fun hitTestLine(p: Offset): Int {
         var best = -1; var bestDist = 26f
         shapes.forEachIndexed { i, s ->
             if (s.kind == ShapeKind.LINE) {
                 val d = distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
+                if (d < bestDist) { bestDist = d; best = i }
+            } else if (s.kind == ShapeKind.XLINE) {
+                val d = distToInfiniteLine(p, Offset(s.x1, s.y1), Offset(s.x2 - s.x1, s.y2 - s.y1))
                 if (d < bestDist) { bestDist = d; best = i }
             }
         }
@@ -574,6 +590,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         .minOrNull() ?: Float.MAX_VALUE
                 }
                 ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
+                ShapeKind.XLINE -> distToInfiniteLine(p, Offset(s.x1, s.y1), Offset(s.x2 - s.x1, s.y2 - s.y1))
                 else -> Float.MAX_VALUE
             }
             if (d < bestDist) { bestDist = d; best = i }
@@ -1384,6 +1401,22 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { showPolarAngleDialog = false }
         )
     }
+    scaleBasePoint?.let { base ->
+        ScaleFactorDialog(
+            selectedCount = selectedIndices.size,
+            onConfirm = { f ->
+                pushUndo()
+                selectedIndices.forEach { idx ->
+                    val s = shapes[idx]
+                    val centered = translateShape(s, -base.x, -base.y)
+                    val scaled = scaleShape(centered, f)
+                    shapes[idx] = translateShape(scaled, base.x, base.y)
+                }
+                scaleBasePoint = null; scaleModeActive = false
+            },
+            onCancel = { scaleBasePoint = null; scaleModeActive = false }
+        )
+    }
     if (showWallThicknessDialog) {
         WallThicknessDialog(
             initial = wallThickness?.let { trimNum(mmToDisplay(it, unit)) } ?: "",
@@ -1599,6 +1632,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             commandFeedback = if (before == 0) "Nothing selected to erase" else null
             return
         }
+        // CAL <expression> (AutoCAD's own inline calculator) — doesn't touch tools/selection at
+        // all, just evaluates and shows the result, so it's safe as a transparent-style command
+        // even without the leading ' (matches how AutoCAD lets 'CAL run mid-command too).
+        if (cmd.startsWith("CAL ") || cmd.startsWith("CALC ")) {
+            val exprPart = cmd.substringAfter(' ').trim()
+            val result = CalcParser(exprPart).eval()
+            commandFeedback = if (result != null) "= ${trimNum(result)}" else "Invalid expression: $exprPart"
+            return
+        }
         // A normal command replaces whatever's active, same as AutoCAD starting a new command;
         // a transparent one leaves the current tool/in-progress points alone.
         if (!transparent) resetToolState()
@@ -1711,6 +1753,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.ARC, onClick = {
                     tool = Tool.ARC; resetToolState()
                 }, label = { Text("Arc") })
+                FilterChip(selected = tool == Tool.XLINE, onClick = {
+                    tool = Tool.XLINE; resetToolState()
+                }, label = { Text("Xline") })
                 FilterChip(selected = tool == Tool.DISTANCE, onClick = {
                     tool = Tool.DISTANCE; resetToolState()
                 }, label = { Text("Distance") })
@@ -1759,13 +1804,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Text("${selectedIndices.size} selected", style = MaterialTheme.typography.bodySmall)
                     FilterChip(
                         selected = moveModeActive,
-                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) copyModeActive = false },
+                        onClick = { moveModeActive = !moveModeActive; if (moveModeActive) { copyModeActive = false; scaleModeActive = false } },
                         label = { Text("Move") }
                     )
                     FilterChip(
                         selected = copyModeActive,
-                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) moveModeActive = false },
+                        onClick = { copyModeActive = !copyModeActive; if (copyModeActive) { moveModeActive = false; scaleModeActive = false } },
                         label = { Text("Copy") }
+                    )
+                    FilterChip(
+                        selected = scaleModeActive,
+                        onClick = {
+                            scaleModeActive = !scaleModeActive
+                            if (scaleModeActive) { moveModeActive = false; copyModeActive = false } else scaleBasePoint = null
+                        },
+                        label = { Text("Scale") }
                     )
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
@@ -1826,6 +1879,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                 }
             }
+            if (tool == Tool.XLINE) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = xlineHorizontal, onClick = { xlineHorizontal = true }, label = { Text("Horizontal") })
+                    FilterChip(selected = !xlineHorizontal, onClick = { xlineHorizontal = false }, label = { Text("Vertical") })
+                }
+            }
             if (tool == Tool.FREEHAND) {
                 Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(
@@ -1870,6 +1929,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     tool == Tool.BLOCK -> "Tap where to drop '${pendingBlockInsert?.name}'"
                     tool == Tool.FREEHAND && freehandRoomMode -> "Drag to sketch a room — it's auto-straightened into walls, then asks for the top wall's real length"
                     tool == Tool.FREEHAND -> "Drag to draw a freehand stroke"
+                    tool == Tool.BOX_SELECT && scaleModeActive -> "Tap the point the selection should scale around"
                     tool == Tool.BOX_SELECT && moveModeActive -> "Drag anywhere to move the selection, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && copyModeActive -> "Drag to where the copy should go, then release" + if (snapOn) " (snaps to nearby points)" else ""
                     tool == Tool.BOX_SELECT && selectedIndices.isEmpty() -> "Drag left→right to select only fully-enclosed shapes, right→left to select anything touched"
@@ -2100,6 +2160,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         }
                                     }
                                 })
+                                Tool.XLINE -> detectTapGestures(onTap = { p ->
+                                    val anchor = trySnapPoint(p)
+                                    pushUndo()
+                                    shapes.add(
+                                        SketchShape(
+                                            workId = 0, kind = ShapeKind.XLINE,
+                                            x1 = anchor.x, y1 = anchor.y,
+                                            x2 = anchor.x + if (xlineHorizontal) 1f else 0f,
+                                            y2 = anchor.y + if (xlineHorizontal) 0f else 1f,
+                                            color = currentColor?.toArgb()
+                                        )
+                                    )
+                                })
                                 Tool.DISTANCE -> detectTapGestures(onTap = { p ->
                                     val start = distanceStart
                                     if (start == null) {
@@ -2213,7 +2286,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         freehandPoints.clear()
                                     }
                                 )
-                                Tool.BOX_SELECT -> if (moveModeActive || copyModeActive) {
+                                Tool.BOX_SELECT -> if (scaleModeActive) {
+                                    // Armed by the Scale action: one tap picks the base point the
+                                    // selection scales around (a dialog then asks for the factor).
+                                    detectTapGestures(onTap = { p -> scaleBasePoint = trySnapPoint(p) })
+                                } else if (moveModeActive || copyModeActive) {
                                     // Armed by the Move or Copy action: this drag supplies the placement —
                                     // Move translates the selection, Copy leaves the originals and adds
                                     // translated duplicates instead. While dragging, the nearest existing
@@ -2438,6 +2515,30 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         size = androidx.compose.ui.geometry.Size(s.r * 2f, s.r * 2f),
                                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                     )
+                                }
+                                ShapeKind.XLINE -> {
+                                    // Stored as a tiny (1-unit) direction vector so it never distorts
+                                    // Fit-to-screen/DXF-extent math (see ShapeKind.XLINE's doc comment)
+                                    // — extended out to the current view's edges only here, at draw
+                                    // time, using the same screen<->content mapping toContentSpace
+                                    // uses, so it always reaches exactly to both edges at any zoom/pan.
+                                    val cw = canvasSize.width.toFloat(); val ch = canvasSize.height.toFloat()
+                                    if (cw > 0f && ch > 0f) {
+                                        val left = (0f - viewOffset.x) / viewScale; val right = (cw - viewOffset.x) / viewScale
+                                        val top = (0f - viewOffset.y) / viewScale; val bottom = (ch - viewOffset.y) / viewScale
+                                        val horizontal = abs(s.x2 - s.x1) >= abs(s.y2 - s.y1)
+                                        val margin = maxOf(right - left, bottom - top) * 0.05f
+                                        val (p1, p2) = if (horizontal) {
+                                            Offset(left - margin, s.y1) to Offset(right + margin, s.y1)
+                                        } else {
+                                            Offset(s.x1, top - margin) to Offset(s.x1, bottom + margin)
+                                        }
+                                        drawLine(
+                                            shapeColor(s, Color(0xFF6A1B9A), isHighlighted), p1, p2,
+                                            strokeWidth = strokeW(s, 1.5f, isHighlighted),
+                                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(18f), minPx(10f)))
+                                        )
+                                    }
                                 }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
@@ -2951,6 +3052,40 @@ private fun GroupWidthDialog(onConfirm: (widthPx: Float) -> Unit, onCancel: () -
                 val v = text.toFloatOrNull()
                 if (v == null || v <= 0f) error = "Enter a valid width" else onConfirm(v)
             }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** AutoCAD-style SCALE: the base point is already picked (see [SketchEditorScreen]'s Scale
+ *  action) — this just asks for the factor, e.g. "2" doubles the size, "0.5" halves it. */
+@Composable
+private fun ScaleFactorDialog(selectedCount: Int, onConfirm: (Float) -> Unit, onCancel: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Scale factor") },
+        text = {
+            Column {
+                Text(
+                    "Scales $selectedCount selected shape${if (selectedCount == 1) "" else "s"} around the point you tapped — 2 doubles the size, 0.5 halves it.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it; error = null }, singleLine = true,
+                    label = { Text("Factor") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val v = text.toFloatOrNull()
+                if (v == null || v <= 0f) error = "Enter a factor greater than 0" else onConfirm(v)
+            }) { Text("Scale") }
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )
@@ -3536,3 +3671,63 @@ private fun displayToMm(display: Double, unit: String): Double = if (unit == "cm
 
 private fun trimNum(v: Double): String =
     if (v == v.toLong().toDouble()) v.toLong().toString() else "%.2f".format(v)
+
+/** AutoCAD-style CAL: a minimal arithmetic evaluator (+, -, *, /, parentheses, decimals, unary
+ *  minus) for the command line's "CAL <expression>" command. A class rather than local functions
+ *  inside a plain evaluator function — parseExpr/parseFactor need to call each other, and Kotlin
+ *  local functions can't forward-reference one another the way member functions of a class (like
+ *  top-level functions) can. */
+private class CalcParser(private val expr: String) {
+    private var pos = 0
+    private fun peek(): Char? = expr.getOrNull(pos)
+    private fun skipSpace() { while (peek() == ' ') pos++ }
+    private fun parseNumber(): Double? {
+        skipSpace()
+        val start = pos
+        while (peek()?.isDigit() == true) pos++
+        if (peek() == '.') { pos++; while (peek()?.isDigit() == true) pos++ }
+        return if (pos == start) null else expr.substring(start, pos).toDoubleOrNull()
+    }
+    private fun parseFactor(): Double? {
+        skipSpace()
+        if (peek() == '-') { pos++; return parseFactor()?.let { -it } }
+        if (peek() == '+') { pos++; return parseFactor() }
+        if (peek() == '(') {
+            pos++
+            val v = parseExpr() ?: return null
+            skipSpace()
+            if (peek() != ')') return null
+            pos++
+            return v
+        }
+        return parseNumber()
+    }
+    private fun parseTerm(): Double? {
+        var v = parseFactor() ?: return null
+        while (true) {
+            skipSpace()
+            when (peek()) {
+                '*' -> { pos++; v *= parseFactor() ?: return null }
+                '/' -> { pos++; val r = parseFactor() ?: return null; if (r == 0.0) return null; v /= r }
+                else -> return v
+            }
+        }
+    }
+    private fun parseExpr(): Double? {
+        var v = parseTerm() ?: return null
+        while (true) {
+            skipSpace()
+            when (peek()) {
+                '+' -> { pos++; v += parseTerm() ?: return null }
+                '-' -> { pos++; v -= parseTerm() ?: return null }
+                else -> return v
+            }
+        }
+    }
+    /** Evaluates the whole string, or null if it isn't a valid expression (including trailing junk). */
+    fun eval(): Double? {
+        val result = parseExpr() ?: return null
+        skipSpace()
+        return if (pos == expr.length) result else null
+    }
+}

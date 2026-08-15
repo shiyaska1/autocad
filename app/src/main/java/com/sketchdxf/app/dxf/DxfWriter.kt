@@ -128,6 +128,21 @@ object DxfWriter {
                     fun norm360(d: Double) = ((d % 360.0) + 360.0) % 360.0
                     listOf(Entity.Arc(dxfCx, dxfCy, dxfR, norm360(start50), norm360(end51), s.color))
                 }
+                // XLINE has no real length by design (its stored x2,y2 is just a tiny direction
+                // marker, see ShapeKind.XLINE) — exported as a long-but-finite LINE instead of a
+                // real DXF XLINE entity, extended generously past any normal drawing's extent so it
+                // still reads as a construction/reference line when opened.
+                ShapeKind.XLINE -> {
+                    val dirX = s.x2 - s.x1; val dirY = s.y2 - s.y1
+                    val len = hypot(dirX.toDouble(), dirY.toDouble())
+                    if (len < 1e-6) emptyList() else {
+                        val ux = dirX / len; val uy = dirY / len
+                        val reach = 100000.0 // mm, well past any realistic sketch's extent
+                        val ax = s.x1 - (ux * reach / scale).toFloat(); val ay = s.y1 - (uy * reach / scale).toFloat()
+                        val bx = s.x1 + (ux * reach / scale).toFloat(); val by = s.y1 + (uy * reach / scale).toFloat()
+                        listOf(Entity.Line(sx(ax), sy(ay), sx(bx), sy(by), s.color))
+                    }
+                }
                 else -> emptyList()
             }
         }

@@ -101,6 +101,13 @@ object ShapeKind {
      *  one true LWPOLYLINE entity instead of a chain of separate LINE segments — see
      *  SketchEditorScreen's "Convert to Polyline" action and [SketchCircleFit]. */
     const val POLYLINE = "POLYLINE"
+    /** An AutoCAD-style construction line (XLINE): unbounded in both directions through the
+     *  anchor point x1,y1, in the direction of the unit vector x2-x1,y2-y1 (always exactly 1 unit
+     *  long in canvas-pixel space, e.g. (1,0) for horizontal or (0,1) for vertical) — kept tiny in
+     *  storage terms so it never distorts bounding-box calculations (Fit to screen, DXF page
+     *  extent, ...) the way a literally very-long line would; the editor extends it to the current
+     *  view's edges only when actually drawing it on screen. */
+    const val XLINE = "XLINE"
 }
 
 /**
