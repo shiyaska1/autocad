@@ -2230,7 +2230,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
 
             Box(
-                (if (fullscreenCanvas) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(3f / 4f))
+                // Slightly shorter than a plain 3:4 (was 1.33x width tall, now 1.2x) — frees up
+                // vertical room below so the command line/feedback text isn't pushed off the
+                // bottom of the screen on shorter phones; this Column has no scroll of its own.
+                (if (fullscreenCanvas) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(1f / 1.2f))
                     // The background image below is scaled via graphicsLayer, which doesn't clip by
                     // default — without this, zooming in lets it visually spill out over the toolbar.
                     .clipToBounds()
@@ -3142,12 +3145,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             }
 
             if (!fullscreenCanvas) {
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Command line", style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = { commandLineVisible = !commandLineVisible }) {
+                TextButton(onClick = { commandLineVisible = !commandLineVisible }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) {
                     Text(if (commandLineVisible) "Hide" else "Show")
                 }
             }
@@ -3161,7 +3164,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         placeholder = { Text("L, C, FILLET, 'ORTHO …") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
                         keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { runCommand(commandInput) }),
-                        modifier = Modifier.weight(1f).height(52.dp)
+                        modifier = Modifier.weight(1f).height(48.dp)
                     )
                     TextButton(onClick = { runCommand(commandInput) }, modifier = Modifier.padding(start = 6.dp)) { Text("Run") }
                 }
@@ -3169,7 +3172,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(6.dp))
 
             }
         }
