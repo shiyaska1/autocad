@@ -13,6 +13,10 @@ android {
         applicationId = "com.sketchdxf.app"
         minSdk = 26
         targetSdk = 36
+        // Bump this on every release. Forced updates key off it: BootScreen (see UpdateChecker)
+        // blocks anyone whose installed versionCode is below update-config.json's minVersionCode
+        // at the repo root — raise minVersionCode there (to this value or lower) to require the
+        // update, or leave it as-is/lower to make a release optional.
         versionCode = 4
         versionName = "1.3.0"
         vectorDrawables { useSupportLibrary = true }

@@ -16,10 +16,12 @@ import androidx.navigation.navArgument
 import androidx.navigation.compose.rememberNavController
 import com.sketchdxf.app.ui.BackupScreen
 import com.sketchdxf.app.ui.BlockLibraryScreen
+import com.sketchdxf.app.data.PendingUpdateInfo
 import com.sketchdxf.app.ui.BootScreen
 import com.sketchdxf.app.ui.DxfDetailScreen
 import com.sketchdxf.app.ui.DxfHomeScreen
 import com.sketchdxf.app.ui.DxfListScreen
+import com.sketchdxf.app.ui.ForceUpdateScreen
 import com.sketchdxf.app.ui.LicenseScreen
 import com.sketchdxf.app.ui.SketchEditorScreen
 
@@ -53,6 +55,9 @@ private fun SketchDxfApp() {
             LicenseScreen(onActivated = {
                 nav.navigate("list") { popUpTo(0) { inclusive = true } }
             })
+        }
+        composable("force_update") {
+            ForceUpdateScreen(message = PendingUpdateInfo.message, updateUrl = PendingUpdateInfo.updateUrl)
         }
         composable("list") {
             DxfListScreen(
