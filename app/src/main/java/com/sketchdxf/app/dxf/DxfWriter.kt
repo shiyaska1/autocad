@@ -4,7 +4,9 @@ import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchPath
 import com.sketchdxf.app.data.SketchShape
 import java.io.File
+import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.sin
 
 /** A minimal, dependency-free ASCII DXF writer — same "hand-build the file format" approach the
  *  billing app uses for its .xlsx export, just for DXF's much simpler group-code text format. */
@@ -48,10 +50,12 @@ object DxfWriter {
         // Flip Y (screen space grows downward, DXF space grows upward) around the drawing's
         // own top edge, so the exported drawing isn't mirrored vertically.
         val maxY = shapes.maxOf { s ->
-            val pathMaxY = if (s.kind == ShapeKind.FREEHAND || s.kind == ShapeKind.POLYLINE) {
+            val pathMaxY = if (s.kind == ShapeKind.FREEHAND || s.kind == ShapeKind.POLYLINE || s.kind == ShapeKind.HATCH) {
                 SketchPath.parse(s.path).maxOfOrNull { it.second } ?: Float.NEGATIVE_INFINITY
             } else Float.NEGATIVE_INFINITY
-            maxOf(s.y1, s.y2, s.cy + s.r, pathMaxY)
+            // HATCH reuses y1 for line spacing (not a coordinate, see ShapeKind.HATCH) — excluded
+            // here so a small spacing value can't be mistaken for part of the drawing's extent.
+            if (s.kind == ShapeKind.HATCH) pathMaxY else maxOf(s.y1, s.y2, s.cy + s.r, pathMaxY)
         }.toDouble()
         fun sx(x: Float) = x * scale
         fun sy(y: Float) = (maxY - y) * scale
@@ -132,6 +136,16 @@ object DxfWriter {
                 // marker, see ShapeKind.XLINE) — exported as a long-but-finite LINE instead of a
                 // real DXF XLINE entity, extended generously past any normal drawing's extent so it
                 // still reads as a construction/reference line when opened.
+                ShapeKind.HATCH -> {
+                    // Same scanline even-odd fill SketchEditorScreen's computeHatchLines draws with,
+                    // run here in the shape's own (pre-scale) canvas-pixel space so the exported
+                    // segments land exactly where the editor showed them, then mapped through sx/sy
+                    // like every other entity.
+                    val boundary = SketchPath.parse(s.path)
+                    hatchLines(boundary, s.x1, s.y1).map { (a, b) ->
+                        Entity.Line(sx(a.first), sy(a.second), sx(b.first), sy(b.second), s.color)
+                    }
+                }
                 ShapeKind.XLINE -> {
                     val dirX = s.x2 - s.x1; val dirY = s.y2 - s.y1
                     val len = hypot(dirX.toDouble(), dirY.toDouble())
@@ -146,6 +160,39 @@ object DxfWriter {
                 else -> emptyList()
             }
         }
+    }
+
+    /** Parallel crosshatch segments filling closed [boundary] at [angleDeg]/[spacingPx] — the same
+     *  scanline even-odd fill as SketchEditorScreen's computeHatchLines, duplicated here (rather
+     *  than shared) since this module stays dependency-free of the UI's Compose Offset type. */
+    private fun hatchLines(boundary: List<Pair<Float, Float>>, angleDeg: Float, spacingPx: Float): List<Pair<Pair<Float, Float>, Pair<Float, Float>>> {
+        if (boundary.size < 3 || spacingPx < 1f) return emptyList()
+        val rad = Math.toRadians(angleDeg.toDouble())
+        val cosA = cos(rad).toFloat(); val sinA = sin(rad).toFloat()
+        fun toHatchSpace(p: Pair<Float, Float>) = (p.first * cosA + p.second * sinA) to (-p.first * sinA + p.second * cosA)
+        fun fromHatchSpace(p: Pair<Float, Float>) = (p.first * cosA - p.second * sinA) to (p.first * sinA + p.second * cosA)
+        val rotated = boundary.map { toHatchSpace(it) }
+        val minY = rotated.minOf { it.second }; val maxY = rotated.maxOf { it.second }
+        val result = mutableListOf<Pair<Pair<Float, Float>, Pair<Float, Float>>>()
+        var y = minY + spacingPx / 2f
+        while (y < maxY) {
+            val xs = mutableListOf<Float>()
+            for (i in rotated.indices) {
+                val a = rotated[i]; val b = rotated[(i + 1) % rotated.size]
+                if ((a.second <= y && b.second > y) || (b.second <= y && a.second > y)) {
+                    val t = (y - a.second) / (b.second - a.second)
+                    xs.add(a.first + t * (b.first - a.first))
+                }
+            }
+            xs.sort()
+            var i = 0
+            while (i + 1 < xs.size) {
+                result.add(fromHatchSpace(xs[i] to y) to fromHatchSpace(xs[i + 1] to y))
+                i += 2
+            }
+            y += spacingPx
+        }
+        return result
     }
 
     private fun render(entities: List<Entity>): String {

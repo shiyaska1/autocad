@@ -360,6 +360,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     // selection scales around, and a dialog asks for the factor (2 = double size, 0.5 = half).
     var scaleModeActive by remember { mutableStateOf(false) }
     var scaleBasePoint by remember { mutableStateOf<Offset?>(null) }
+    // Hatch (Box Select action): tapping "Hatch" traces the selected LINEs into a closed boundary
+    // loop (see traceClosedPolygon) — on success a dialog asks for angle/spacing/colour, on
+    // failure commandFeedback explains why (not a closed loop of plain lines).
+    var pendingHatchBoundary by remember { mutableStateOf<List<Offset>?>(null) }
     // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
     // would land on — shown as a highlight, and used as the actual drop point on release.
     var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
@@ -590,6 +594,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     else pts.zipWithNext { a, b -> distToSegment(p, Offset(a.first, a.second), Offset(b.first, b.second)) }
                         .minOrNull() ?: Float.MAX_VALUE
                 }
+                ShapeKind.HATCH -> {
+                    // Hit-tests the boundary loop, not the fill lines — taps anywhere on the
+                    // traced edge select the hatch, same as tapping a FREEHAND/POLYLINE's path.
+                    val pts = SketchPath.parse(s.path)
+                    if (pts.size < 2) Float.MAX_VALUE
+                    else (pts.zipWithNext { a, b -> a to b } + (pts.last() to pts.first()))
+                        .map { (a, b) -> distToSegment(p, Offset(a.first, a.second), Offset(b.first, b.second)) }
+                        .minOrNull() ?: Float.MAX_VALUE
+                }
                 ShapeKind.ARC -> arcPoints(s).zipWithNext { a, b -> distToSegment(p, a, b) }.minOrNull() ?: Float.MAX_VALUE
                 ShapeKind.XLINE -> distToInfiniteLine(p, Offset(s.x1, s.y1), Offset(s.x2 - s.x1, s.y2 - s.y1))
                 else -> Float.MAX_VALUE
@@ -620,7 +633,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     fun shapeBounds(s: SketchShape): androidx.compose.ui.geometry.Rect = when (s.kind) {
         ShapeKind.CIRCLE -> androidx.compose.ui.geometry.Rect(s.cx - s.r, s.cy - s.r, s.cx + s.r, s.cy + s.r)
         ShapeKind.TEXT -> textExtent(s).let { (w, h) -> androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f) }
-        ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
+        ShapeKind.FREEHAND, ShapeKind.POLYLINE, ShapeKind.HATCH -> {
             val pts = SketchPath.parse(s.path)
             if (pts.isEmpty()) androidx.compose.ui.geometry.Rect(s.x1, s.y1, s.x1, s.y1)
             else androidx.compose.ui.geometry.Rect(
@@ -706,6 +719,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         ShapeKind.CIRCLE -> s.copy(cx = s.cx + dx, cy = s.cy + dy)
         ShapeKind.TEXT -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy)
         ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
+        // x1/y1 hold hatch angle/spacing, not a position (see ShapeKind.HATCH) — only the
+        // boundary path moves; unlike FREEHAND/POLYLINE, x1/y1 must NOT shift with it.
+        ShapeKind.HATCH -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x + dx) to (y + dy) }))
         ShapeKind.ARC -> s.copy(cx = s.cx + dx, cy = s.cy + dy, x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
         else -> s.copy(x1 = s.x1 + dx, y1 = s.y1 + dy, x2 = s.x2 + dx, y2 = s.y2 + dy)
     }
@@ -717,8 +733,74 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         ShapeKind.CIRCLE -> s.copy(cx = s.cx * f, cy = s.cy * f, r = s.r * f)
         ShapeKind.TEXT -> s.copy(x1 = s.x1 * f, y1 = s.y1 * f)
         ShapeKind.FREEHAND, ShapeKind.POLYLINE -> s.copy(path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x * f) to (y * f) }))
+        // Scale the boundary and the line spacing (still px), but not the angle (x1, degrees).
+        ShapeKind.HATCH -> s.copy(
+            path = SketchPath.serialize(SketchPath.parse(s.path).map { (x, y) -> (x * f) to (y * f) }),
+            y1 = s.y1 * f
+        )
         ShapeKind.ARC -> s.copy(cx = s.cx * f, cy = s.cy * f, r = s.r * f, x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
         else -> s.copy(x1 = s.x1 * f, y1 = s.y1 * f, x2 = s.x2 * f, y2 = s.y2 * f)
+    }
+
+    /** Chains a Box Select of LINE shapes end-to-end into a closed boundary polygon for Hatch —
+     *  starting from an arbitrary line, repeatedly finds whichever remaining selected line has an
+     *  endpoint within [tol] px of the current chain tip and walks onto it, until every line is
+     *  used. Returns the ordered vertex loop, or null if the selection isn't exactly a simple
+     *  closed loop of LINEs (wrong kind, a dangling end, a branch, or fewer than 3 lines) — v1
+     *  scope is plain LINE boundaries only, no ARC/POLYLINE support yet. */
+    fun traceClosedPolygon(indices: List<Int>, tol: Float = 5f): List<Offset>? {
+        val lines = indices.mapNotNull { shapes.getOrNull(it) }.filter { it.kind == ShapeKind.LINE }
+        if (lines.size != indices.size || lines.size < 3) return null
+        val remaining = lines.toMutableList()
+        val first = remaining.removeAt(0)
+        val start = Offset(first.x1, first.y1)
+        val points = mutableListOf(start)
+        var tip = Offset(first.x2, first.y2)
+        while (remaining.isNotEmpty()) {
+            val idx = remaining.indexOfFirst { l ->
+                hypotF(l.x1 - tip.x, l.y1 - tip.y) < tol || hypotF(l.x2 - tip.x, l.y2 - tip.y) < tol
+            }
+            if (idx < 0) return null
+            val l = remaining.removeAt(idx)
+            tip = if (hypotF(l.x1 - tip.x, l.y1 - tip.y) < tol) Offset(l.x2, l.y2) else Offset(l.x1, l.y1)
+            if (remaining.isNotEmpty()) points.add(tip)
+        }
+        return if (hypotF(tip.x - start.x, tip.y - start.y) < tol) points else null
+    }
+
+    /** Parallel crosshatch segments filling closed [boundary] at [angleDeg] (measured the same way
+     *  a LINE's angle is) spaced [spacingPx] apart, clipped to the polygon under an even-odd fill
+     *  rule — a standard scanline fill: rotate the boundary so the hatch direction becomes the
+     *  local x-axis, step across the perpendicular axis, intersect each step with every edge, sort
+     *  the hits and pair them up two at a time as "inside" spans, then rotate back. */
+    fun computeHatchLines(boundary: List<Offset>, angleDeg: Float, spacingPx: Float): List<Pair<Offset, Offset>> {
+        if (boundary.size < 3 || spacingPx < 1f) return emptyList()
+        val rad = Math.toRadians(angleDeg.toDouble())
+        val cosA = cos(rad).toFloat(); val sinA = sin(rad).toFloat()
+        fun toHatchSpace(p: Offset) = Offset(p.x * cosA + p.y * sinA, -p.x * sinA + p.y * cosA)
+        fun fromHatchSpace(p: Offset) = Offset(p.x * cosA - p.y * sinA, p.x * sinA + p.y * cosA)
+        val rotated = boundary.map { toHatchSpace(it) }
+        val minY = rotated.minOf { it.y }; val maxY = rotated.maxOf { it.y }
+        val result = mutableListOf<Pair<Offset, Offset>>()
+        var y = minY + spacingPx / 2f
+        while (y < maxY) {
+            val xs = mutableListOf<Float>()
+            for (i in rotated.indices) {
+                val a = rotated[i]; val b = rotated[(i + 1) % rotated.size]
+                if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) {
+                    val t = (y - a.y) / (b.y - a.y)
+                    xs.add(a.x + t * (b.x - a.x))
+                }
+            }
+            xs.sort()
+            var i = 0
+            while (i + 1 < xs.size) {
+                result.add(fromHatchSpace(Offset(xs[i], y)) to fromHatchSpace(Offset(xs[i + 1], y)))
+                i += 2
+            }
+            y += spacingPx
+        }
+        return result
     }
 
     /** Removes every selected shape, highest index first so earlier removals don't shift the rest. */
@@ -1442,6 +1524,23 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             onCancel = { scaleBasePoint = null; scaleModeActive = false }
         )
     }
+    pendingHatchBoundary?.let { boundary ->
+        HatchDialog(
+            onConfirm = { angleDeg, spacingPx, color ->
+                pushUndo()
+                shapes.add(
+                    SketchShape(
+                        workId = 0, kind = ShapeKind.HATCH,
+                        path = SketchPath.serialize(boundary.map { it.x to it.y }),
+                        x1 = angleDeg, y1 = spacingPx, color = color?.toArgb()
+                    )
+                )
+                pendingHatchBoundary = null
+                selectedIndices.clear()
+            },
+            onCancel = { pendingHatchBoundary = null }
+        )
+    }
     if (showWallThicknessDialog) {
         WallThicknessDialog(
             initial = wallThickness?.let { trimNum(mmToDisplay(it, unit)) } ?: "",
@@ -1859,6 +1958,18 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         FilterChip(selected = false, onClick = { smoothSelection() }, label = { Text("Smooth") })
                     }
                     FilterChip(selected = false, onClick = { showGroupWidthDialog = true }, label = { Text("Width") })
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            val boundary = traceClosedPolygon(selectedIndices)
+                            if (boundary == null) {
+                                commandFeedback = "Select only plain Lines forming one closed loop to Hatch"
+                            } else {
+                                pendingHatchBoundary = boundary
+                            }
+                        },
+                        label = { Text("Hatch") }
+                    )
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
                     FilterChip(
                         selected = false,
@@ -2569,6 +2680,14 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                         )
                                     }
                                 }
+                                ShapeKind.HATCH -> {
+                                    val boundary = SketchPath.parse(s.path).map { (x, y) -> Offset(x, y) }
+                                    val hatchColor = shapeColor(s, linePaint, isHighlighted)
+                                    val hatchW = strokeW(s, 1f, isHighlighted)
+                                    computeHatchLines(boundary, s.x1, s.y1).forEach { (a, b) ->
+                                        drawLine(hatchColor, a, b, strokeWidth = hatchW)
+                                    }
+                                }
                                 ShapeKind.DIMENSION -> {
                                     val dimColor = shapeColor(s, Color(0xFF6A1B9A), isHighlighted)
                                     val dimW = strokeW(s, 3f, isHighlighted)
@@ -3147,6 +3266,48 @@ private fun PolarAngleDialog(initial: String, onConfirm: (Float) -> Unit, onCanc
                 val v = text.toFloatOrNull()
                 if (v == null || v <= 0f || v > 180f) error = "Enter an angle between 0 and 180" else onConfirm(v)
             }) { Text("Set") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+    )
+}
+
+/** Asked right after a Box Select's traced boundary loop is confirmed closed (see
+ *  SketchEditorScreen's Hatch action) — angle and spacing for the crosshatch fill, plus colour. */
+@Composable
+private fun HatchDialog(onConfirm: (angleDeg: Float, spacingPx: Float, color: Color?) -> Unit, onCancel: () -> Unit) {
+    var angleText by remember { mutableStateOf("45") }
+    var spacingText by remember { mutableStateOf("20") }
+    var pickedColor by remember { mutableStateOf<Color?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Crosshatch") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = angleText, onValueChange = { angleText = it; error = null }, singleLine = true,
+                    label = { Text("Angle (°)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = spacingText, onValueChange = { spacingText = it; error = null }, singleLine = true,
+                    label = { Text("Line spacing (px)") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp)) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val angle = angleText.toFloatOrNull()
+                val spacing = spacingText.toFloatOrNull()
+                if (angle == null) error = "Enter an angle"
+                else if (spacing == null || spacing < 1f) error = "Enter a spacing of at least 1"
+                else onConfirm(angle, spacing, pickedColor)
+            }) { Text("Add Hatch") }
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
     )

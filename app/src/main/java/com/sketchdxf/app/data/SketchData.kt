@@ -108,6 +108,14 @@ object ShapeKind {
      *  extent, ...) the way a literally very-long line would; the editor extends it to the current
      *  view's edges only when actually drawing it on screen. */
     const val XLINE = "XLINE"
+    /** A crosshatch fill for a closed boundary loop (built from a Box Select of the lines that
+     *  form it): [SketchShape.path] holds the boundary polygon's vertices (same [SketchPath]
+     *  encoding FREEHAND/POLYLINE use), [SketchShape.x1] is the hatch angle in degrees, and
+     *  [SketchShape.y1] the line spacing in canvas-pixel space — reusing coordinate fields for
+     *  hatch parameters rather than adding new columns, same convention IMAGE and LINE's dashed
+     *  flag already use. The boundary lines themselves are untouched, separate shapes; this only
+     *  draws the internal crosshatch lines clipped to the polygon. */
+    const val HATCH = "HATCH"
 }
 
 /**
