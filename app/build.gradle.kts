@@ -127,5 +127,9 @@ dependencies {
     // EXIF rotation, so a sideways photo detects lines right-side-up.
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
+    // Play in-app updates: forces an update as soon as one is published (see AppUpdater). Same
+    // dependency/approach as the POS Billing and Kerala Lottery apps.
+    implementation("com.google.android.play:app-update-ktx:2.1.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

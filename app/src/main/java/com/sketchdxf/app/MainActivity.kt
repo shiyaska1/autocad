@@ -24,10 +24,14 @@ import com.sketchdxf.app.ui.DxfListScreen
 import com.sketchdxf.app.ui.ForceUpdateScreen
 import com.sketchdxf.app.ui.LicenseScreen
 import com.sketchdxf.app.ui.SketchEditorScreen
+import com.sketchdxf.app.update.AppUpdater
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Offer the Play update straight away, so users are not left on an old build. A no-op
+        // until this app is actually published on Play (see AppUpdater) — safe to leave on now.
+        AppUpdater.check(this)
         // Sketching/tracing has long stretches with no touch input while you look at the plan —
         // keep the screen from locking for as long as the app is open (normal lock/sleep behaviour
         // resumes the moment you leave it).
@@ -39,6 +43,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-check every time the app comes back to the foreground — this is what makes an
+        // update actually mandatory: backing out of the Play update screen just returns here
+        // and immediately re-blocks, instead of leaving the user on the old build.
+        AppUpdater.check(this)
     }
 }
 
