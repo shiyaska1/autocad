@@ -300,6 +300,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var polarOn by remember { mutableStateOf(false) }
     var polarAngleDeg by remember { mutableStateOf(45f) }
     var showPolarAngleDialog by remember { mutableStateOf(false) }
+    // When on, finishing a Line also adds a Dimension along it automatically (same default
+    // offset/size a manually-placed one gets), so a drawn wall/edge always carries its own
+    // length label without a separate trip to the Dimension tool.
+    var autoDimOn by remember { mutableStateOf(false) }
     // Wall mode: each LINE drawn is treated as a wall's inside face — a second, parallel line is
     // auto-added on the outside at the given thickness. Chained (connected) wall segments have
     // their outside lines mitered to meet exactly at the corner instead of gapping/overlapping.
@@ -477,6 +481,21 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         if (ratios.isNotEmpty()) return ratios.sorted()[ratios.size / 2]
         val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
         return (cw * 0.6f) / 3000f // first-ever line: assume it's roughly a 3 m wall
+    }
+
+    /** Adds a Dimension spanning the line at [idx], labeled with its current measured length —
+     *  same default offset/size a manually-placed Dimension gets. Used by the Line tool's "Dim"
+     *  toggle so a drawn line always carries its own length label without a separate trip to the
+     *  Dimension tool. */
+    fun addAutoDimensionFor(idx: Int) {
+        val s = shapes.getOrNull(idx) ?: return
+        val mm = hypotF(s.x2 - s.x1, s.y2 - s.y1) / currentPxPerMm()
+        shapes.add(
+            SketchShape(
+                workId = 0, kind = ShapeKind.DIMENSION, x1 = s.x1, y1 = s.y1, x2 = s.x2, y2 = s.y2,
+                label = trimNum(mmToDisplay(mm.toDouble(), unit)), dimOffset = 30f
+            )
+        )
     }
 
     fun hitTestLine(p: Offset): Int {
@@ -1343,10 +1362,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 if (chainOn) lineStartPoint = newEnd
                 ensurePointVisible(newEnd)
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
+                if (autoDimOn) addAutoDimensionFor(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
             onUseAsIs = {
                 if (wallModeOn) addWallOuterLine(pendingLengthIndex)
+                if (autoDimOn) addAutoDimensionFor(pendingLengthIndex)
                 pendingLengthIndex = -1
             },
             onCancel = {
@@ -1775,6 +1796,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                     }
                     FilterChip(selected = snapOn, onClick = { snapOn = !snapOn }, label = { Text("Snap") })
                     if (tool == Tool.LINE) FilterChip(selected = chainOn, onClick = { chainOn = !chainOn }, label = { Text("Chain") })
+                    if (tool == Tool.LINE) FilterChip(selected = autoDimOn, onClick = { autoDimOn = !autoDimOn }, label = { Text("Dim") })
                     if (tool == Tool.LINE || tool == Tool.STRETCH) {
                         // Polar only ever takes effect when Ortho is off (see polarProject's call
                         // sites) — same relationship AutoCAD's own Ortho/Polar have.
