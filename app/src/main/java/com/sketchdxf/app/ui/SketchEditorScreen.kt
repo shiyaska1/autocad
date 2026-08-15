@@ -1532,6 +1532,15 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val cmd = raw.trim().removePrefix("'").uppercase()
         commandInput = ""
         if (cmd.isBlank()) return
+        // EXPLODE (AutoCAD's own "X" alias) acts on whatever's already selected, same as
+        // AutoCAD itself — it must run before resetToolState() below, which would otherwise
+        // clear that exact selection out from under it before the command ever sees it.
+        if (cmd == "X" || cmd == "EXPLODE") {
+            val before = selectedIndices.size
+            explodeSelection()
+            commandFeedback = if (before == 0) "Nothing selected to explode" else null
+            return
+        }
         // A normal command replaces whatever's active, same as AutoCAD starting a new command;
         // a transparent one leaves the current tool/in-progress points alone.
         if (!transparent) resetToolState()
