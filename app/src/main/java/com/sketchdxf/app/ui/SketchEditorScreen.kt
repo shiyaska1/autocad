@@ -172,7 +172,8 @@ private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
  * sketch from scratch (baseImagePath == null) — nothing is auto-detected. Coordinates are this
  * composable's own canvas-pixel space — consistent within one work on one device, which is all
  * that's needed. The view can be pinch-zoomed/panned (Pan tool) without affecting that space:
- * zoom/pan is a pure display transform (graphicsLayer), shape coordinates never change with it.
+ * zoom/pan is a pure display transform (a scale()/translate() around the canvas's own draw
+ * block, mirrored by toContentSpace() for touch input), shape coordinates never change with it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1828,9 +1829,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
 
             Box(
                 (if (fullscreenCanvas) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(3f / 4f))
-                    // Zoomed-in content is scaled via graphicsLayer below, which doesn't clip by
-                    // default — without this, zooming in pushes the (invisible) touch region of
-                    // the canvas up over the toolbar, and its buttons stop receiving taps.
+                    // The background image below is scaled via graphicsLayer, which doesn't clip by
+                    // default — without this, zooming in lets it visually spill out over the toolbar.
                     .clipToBounds()
                     .background(Color.White)
                     .border(1.dp, Color(0xFF9E9E9E))
@@ -1855,15 +1855,83 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         }
                     }
             ) {
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer(
-                        scaleX = viewScale, scaleY = viewScale,
-                        translationX = viewOffset.x, translationY = viewOffset.y,
-                        transformOrigin = TransformOrigin(0f, 0f)
+                // The background image has no touch handling of its own, so a plain graphicsLayer
+                // transform is fine for it — the ambiguity that caused every previous zoom/draw bug
+                // was specifically about a pointerInput NESTED INSIDE a graphicsLayer'd ancestor,
+                // which no longer applies now that the Canvas below isn't inside one.
+                if (baseBitmap != null) {
+                    Image(
+                        baseBitmap, null,
+                        modifier = Modifier.fillMaxSize().graphicsLayer(
+                            scaleX = viewScale, scaleY = viewScale,
+                            translationX = viewOffset.x, translationY = viewOffset.y,
+                            transformOrigin = TransformOrigin(0f, 0f)
+                        ),
+                        contentScale = ContentScale.Fit
                     )
-                ) {
-                    if (baseBitmap != null) {
-                        Image(baseBitmap, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                }
+                // Converts a raw on-screen touch position into this canvas's own local/content
+                    // space, at the CURRENT zoom/pan — the exact inverse of the translate+scale this
+                    // Canvas's own draw block applies below, so the two always stay in lockstep.
+                    // Touches delivered to this Canvas's pointerInput are guaranteed raw/untransformed
+                    // screen coordinates: unlike a graphicsLayer (a compositor-level transform that
+                    // pointer hit-testing may or may not account for depending on Compose's internals
+                    // — the actual, repeated source of every previous zoom/draw bug here), a DrawScope
+                    // transform like translate()/scale() below only ever affects what gets drawn, never
+                    // touch/hit-testing, which is unambiguous, documented Compose behavior.
+                    fun toContentSpace(raw: Offset): Offset =
+                        Offset((raw.x - viewOffset.x) / viewScale, (raw.y - viewOffset.y) / viewScale)
+                    // Hand-rolled replacements for Foundation's detectTapGestures/detectDragGestures
+                    // (same call signatures, so no tool-specific logic below needs to change): convert
+                    // through toContentSpace, and track only the ONE pointer that started the gesture,
+                    // refusing to fire at all if a second finger joins partway through — the stock
+                    // detectors only ever track the first pointer down, so releasing a two-finger
+                    // pinch-zoom one finger at a time could otherwise fire a tool action wherever that
+                    // pinch finger happened to be, not at the user's actual next, deliberate tap.
+                    suspend fun PointerInputScope.detectTapGestures(onTap: (Offset) -> Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.isConsumed) return@awaitEachGesture
+                                if (!change.pressed) {
+                                    if (!multiTouch) onTap(toContentSpace(change.position))
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    suspend fun PointerInputScope.detectDragGestures(
+                        onDragStart: (Offset) -> Unit = {},
+                        onDrag: (Offset) -> Unit,
+                        onDragEnd: () -> Unit = {}
+                    ) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var multiTouch = false
+                            var dragging = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.size > 1) multiTouch = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (multiTouch || change.isConsumed) {
+                                    if (dragging) onDragEnd()
+                                    return@awaitEachGesture
+                                }
+                                if (change.positionChanged()) {
+                                    if (!dragging) { dragging = true; onDragStart(toContentSpace(change.position)) }
+                                    onDrag(toContentSpace(change.position))
+                                    change.consume()
+                                }
+                                if (!change.pressed) {
+                                    if (dragging) onDragEnd()
+                                    break
+                                }
+                            }
+                        }
                     }
                     val stretchArmed = stretchPoints.isNotEmpty()
                     Canvas(
@@ -1871,7 +1939,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             when (tool) {
                                 Tool.CIRCLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = p; dragCurrent = p },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c = dragCurrent
                                         if (s != null && c != null) {
@@ -1886,7 +1954,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 )
                                 Tool.RECTANGLE -> detectDragGestures(
                                     onDragStart = { p -> dragStart = trySnapPoint(p); dragCurrent = dragStart },
-                                    onDrag = { change, _ -> dragCurrent = change.position },
+                                    onDrag = { p -> dragCurrent = p },
                                     onDragEnd = {
                                         val s = dragStart; val c0 = dragCurrent
                                         if (s != null && c0 != null) {
@@ -1997,10 +2065,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             selectTapStart = p
                                         }
                                     },
-                                    onDrag = { change, _ ->
+                                    onDrag = { p ->
                                         val idx = gripDragIndex
                                         if (idx >= 0) {
-                                            val np = trySnapPoint(change.position)
+                                            val np = trySnapPoint(p)
                                             val s = shapes[idx]
                                             // Reshaping an endpoint by hand invalidates any previously
                                             // confirmed/typed real-world length, same as Trim/Extend/Break.
@@ -2058,7 +2126,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.PAN -> {}
                                 Tool.FREEHAND -> detectDragGestures(
                                     onDragStart = { p -> freehandPoints.clear(); freehandPoints.add(p) },
-                                    onDrag = { change, _ -> freehandPoints.add(change.position) },
+                                    onDrag = { p -> freehandPoints.add(p) },
                                     onDragEnd = {
                                         if (freehandPoints.size >= 2) {
                                             if (freehandRoomMode) {
@@ -2084,9 +2152,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // point (if Snap is on) is highlighted and used as the actual drop point.
                                     detectDragGestures(
                                         onDragStart = { p -> moveDragStart = p; moveDragCurrent = p; moveSnapTarget = null },
-                                        onDrag = { change, _ ->
-                                            moveDragCurrent = change.position
-                                            moveSnapTarget = findSnapPoint(change.position, selectedIndices)
+                                        onDrag = { p ->
+                                            moveDragCurrent = p
+                                            moveSnapTarget = findSnapPoint(p, selectedIndices)
                                         },
                                         onDragEnd = {
                                             val s = moveDragStart; val c = moveSnapTarget ?: moveDragCurrent
@@ -2110,7 +2178,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 } else {
                                     detectDragGestures(
                                         onDragStart = { p -> selectDragStart = p; selectDragCurrent = p },
-                                        onDrag = { change, _ -> selectDragCurrent = change.position },
+                                        onDrag = { p -> selectDragCurrent = p },
                                         onDragEnd = {
                                             val s = selectDragStart; val c = selectDragCurrent
                                             if (s != null && c != null) {
@@ -2173,7 +2241,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 Tool.STRETCH -> if (!stretchArmed) {
                                     detectDragGestures(
                                         onDragStart = { p -> stretchDragStart = p; stretchDragCurrent = p },
-                                        onDrag = { change, _ -> stretchDragCurrent = change.position },
+                                        onDrag = { p -> stretchDragCurrent = p },
                                         onDragEnd = {
                                             val s = stretchDragStart; val c = stretchDragCurrent
                                             if (s != null && c != null && hypotF(c.x - s.x, c.y - s.y) > 8f) {
@@ -2207,6 +2275,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                             }
                         }
                     ) {
+                        // Draws everything below in this canvas's own fixed local (content) space —
+                        // the same space every shape's x/y is stored in — then this single transform
+                        // uniformly scales/pans the WHOLE thing for display, mirroring toContentSpace's
+                        // inverse above exactly so touch and drawing never disagree about where
+                        // anything is.
+                        translate(left = viewOffset.x, top = viewOffset.y) {
+                        scale(scaleX = viewScale, scaleY = viewScale, pivot = Offset.Zero) {
                         val linePaint = Color(0xFF1565C0)
                         val highlightPaint = Color(0xFFE65100)
                         // Dimension marks scale with the sketch's own extent instead of a fixed pixel
@@ -2226,7 +2301,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         val dimTextSize = (drawingExtent * 0.028f).coerceIn(20f, 42f)
                         // Every width/radius/text-size literal below is in this canvas's own local
                         // (content) space, which then gets uniformly scaled by viewScale for display
-                        // (see the graphicsLayer this Canvas sits inside). At a normal zoom that's fine,
+                        // (see the scale() this whole draw block sits inside, above). At a normal zoom that's fine,
                         // but after zooming way out — e.g. clicking Fit Screen right after a line ends
                         // up huge — a small fixed local width shrinks to sub-pixel on screen and
                         // effectively disappears, while a freshly drawn shape still gets its correct
@@ -2464,8 +2539,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                 drawCircle(Color(0xFFE65100), radius = maxOf(7f, minPx(4f)), center = p)
                             }
                         }
+                        } // scale
+                        } // translate
                     }
-                }
                 if (fullscreenCanvas) {
                     IconButton(
                         onClick = { fullscreenCanvas = false },
