@@ -52,7 +52,6 @@ import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -389,11 +388,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var rotateDragCurrent by remember { mutableStateOf<Offset?>(null) }
     // Mirror (Box Select action): armed by its own button, then a tap plus a drag place the
     // mirror line — always horizontal or vertical through the tapped point, no freehand angle —
-    // the selection is reflected across it, originals kept (like Copy), matching AutoCAD MIRROR's
-    // default "erase source objects? No".
+    // the selection is reflected across it. mirrorKeepOriginal picks between AutoCAD MIRROR's two
+    // "erase source objects?" answers: true (default, "No") adds mirrored copies and keeps the
+    // originals; false ("Yes") replaces the originals in place instead.
     var mirrorModeActive by remember { mutableStateOf(false) }
     var mirrorPoint1 by remember { mutableStateOf<Offset?>(null) }
     var mirrorDragCurrent by remember { mutableStateOf<Offset?>(null) }
+    var mirrorKeepOriginal by remember { mutableStateOf(true) }
     // While a Move/Copy drag is live, the nearest existing point (if Snap is on) that the drag
     // would land on — shown as a highlight, and used as the actual drop point on release.
     var moveSnapTarget by remember { mutableStateOf<Offset?>(null) }
@@ -597,12 +598,19 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         }
     }
 
-    /** Rough (width, height) in px of a TEXT shape as actually drawn (see the drawing loop and
-     *  [SketchShape.fontSize]) — used so tapping anywhere over a label selects it, not just right
-     *  on its anchor point, which used to make longer or larger text hard to tap reliably. */
-    fun textExtent(s: SketchShape): Pair<Float, Float> {
+    /** Bounding rect of a TEXT shape as actually drawn (see the drawing loop, which places each
+     *  '\n'-separated line at [SketchShape.fontSize]-based line-height increments below the last)
+     *  — used so tapping anywhere over the label selects it, not just right on its anchor point,
+     *  and so box-select/fit-to-screen account for the whole multi-line block, not just one line. */
+    fun textBounds(s: SketchShape): androidx.compose.ui.geometry.Rect {
         val sizePx = if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f
-        return (s.label.length * sizePx * 0.56f) to sizePx
+        val lines = s.label.split('\n')
+        val widestLine = lines.maxOfOrNull { it.length } ?: 0
+        val lineHeight = sizePx * 1.2f
+        val width = widestLine * sizePx * 0.56f
+        val top = s.y1 - sizePx
+        val bottom = s.y1 + (lines.size - 1) * lineHeight + sizePx * 0.3f
+        return androidx.compose.ui.geometry.Rect(s.x1, top, s.x1 + width, bottom)
     }
 
     fun distToRect(p: Offset, r: androidx.compose.ui.geometry.Rect): Float {
@@ -633,10 +641,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             val d = when (s.kind) {
                 ShapeKind.LINE -> distToSegment(p, Offset(s.x1, s.y1), Offset(s.x2, s.y2))
                 ShapeKind.CIRCLE -> abs(hypotF(p.x - s.cx, p.y - s.cy) - s.r)
-                ShapeKind.TEXT -> {
-                    val (w, h) = textExtent(s)
-                    distToRect(p, androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f))
-                }
+                ShapeKind.TEXT -> distToRect(p, textBounds(s))
                 ShapeKind.DIMENSION -> {
                     // Hit-test the line as it's actually drawn (offset from the object, if any),
                     // not the invisible measured segment — otherwise tapping the visible dimension
@@ -696,7 +701,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     /** Bounding box used by box-select to decide whether a shape falls inside the drag rect. */
     fun shapeBounds(s: SketchShape): androidx.compose.ui.geometry.Rect = when (s.kind) {
         ShapeKind.CIRCLE -> androidx.compose.ui.geometry.Rect(s.cx - s.r, s.cy - s.r, s.cx + s.r, s.cy + s.r)
-        ShapeKind.TEXT -> textExtent(s).let { (w, h) -> androidx.compose.ui.geometry.Rect(s.x1, s.y1 - h, s.x1 + w, s.y1 + h * 0.3f) }
+        ShapeKind.TEXT -> textBounds(s)
         ShapeKind.FREEHAND, ShapeKind.POLYLINE, ShapeKind.HATCH -> {
             val pts = SketchPath.parse(s.path)
             if (pts.isEmpty()) androidx.compose.ui.geometry.Rect(s.x1, s.y1, s.x1, s.y1)
@@ -2178,6 +2183,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         },
                         label = { Text("Mirror") }
                     )
+                    if (mirrorModeActive) {
+                        // AutoCAD's own MIRROR asks "erase source objects?" — this is that same
+                        // choice as a toggle instead of a prompt: on (default) keeps the originals
+                        // and adds mirrored copies, off replaces the originals in place (a true
+                        // flip/move rather than a copy).
+                        FilterChip(
+                            selected = mirrorKeepOriginal,
+                            onClick = { mirrorKeepOriginal = !mirrorKeepOriginal },
+                            label = { Text(if (mirrorKeepOriginal) "Keep original" else "Move (no copy)") }
+                        )
+                    }
                     FilterChip(selected = false, onClick = { deleteSelection() }, label = { Text("Delete") })
                     if (selectedIndices.any { shapes.getOrNull(it)?.kind == ShapeKind.FREEHAND }) {
                         FilterChip(
@@ -2756,9 +2772,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                             val p1 = mirrorPoint1; val p2 = mirrorDragCurrent
                                             if (p1 != null && p2 != null && hypotF(p2.x - p1.x, p2.y - p1.y) > 2f) {
                                                 pushUndo()
-                                                val mirrored = selectedIndices.sorted().map { mirrorShape(shapes[it], p1.x, p1.y, p2.x, p2.y) }
-                                                selectedIndices.clear()
-                                                mirrored.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+                                                if (mirrorKeepOriginal) {
+                                                    val mirrored = selectedIndices.sorted().map { mirrorShape(shapes[it], p1.x, p1.y, p2.x, p2.y) }
+                                                    selectedIndices.clear()
+                                                    mirrored.forEach { shapes.add(it); selectedIndices.add(shapes.lastIndex) }
+                                                } else {
+                                                    selectedIndices.forEach { idx -> shapes[idx] = mirrorShape(shapes[idx], p1.x, p1.y, p2.x, p2.y) }
+                                                }
                                             }
                                             mirrorPoint1 = null; mirrorDragCurrent = null; mirrorModeActive = false
                                         }
@@ -2956,27 +2976,41 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     // with the Dimension tool.
                                     val lineColor = shapeColor(s, if (s.confirmed) Color(0xFF2E7D32) else linePaint, isHighlighted)
                                     val w = strokeW(s, 5f, isHighlighted)
-                                    // s.major doubles as a "dashed" flag for LINE (see ShapeEditDialog) —
-                                    // an internal/reference line style, distinct from a plain solid one.
-                                    val dashEffect = if (s.major) {
-                                        androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(14f), minPx(8f)))
-                                    } else null
-                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = w, pathEffect = dashEffect)
+                                    // LINE's style (solid/dashed/dotted/dash-dot) reuses label, which
+                                    // LINE otherwise has no use for (see ShapeEditDialog) — s.major is
+                                    // still honoured as "dashed" for lines saved before this existed,
+                                    // when label is blank.
+                                    val style = s.label.ifBlank { if (s.major) "dashed" else "solid" }
+                                    val dashEffect = when (style) {
+                                        "dotted" -> androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(2f), minPx(7f)))
+                                        "dashdot" -> androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(16f), minPx(6f), minPx(2f), minPx(6f)))
+                                        "dashed" -> androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(minPx(14f), minPx(8f)))
+                                        else -> null
+                                    }
+                                    val lineCap = if (style == "dotted") androidx.compose.ui.graphics.StrokeCap.Round else androidx.compose.ui.graphics.StrokeCap.Butt
+                                    drawLine(lineColor, Offset(s.x1, s.y1), Offset(s.x2, s.y2), strokeWidth = w, pathEffect = dashEffect, cap = lineCap)
                                 }
                                 ShapeKind.CIRCLE -> drawCircle(
                                     shapeColor(s, linePaint, isHighlighted), radius = s.r, center = Offset(s.cx, s.cy),
                                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW(s, 5f, isHighlighted))
                                 )
-                                ShapeKind.TEXT -> drawContext.canvas.nativeCanvas.drawText(
-                                    s.label, s.x1, s.y1,
-                                    android.graphics.Paint().apply {
+                                ShapeKind.TEXT -> {
+                                    // Labels can be multi-line now — Canvas.drawText doesn't
+                                    // interpret '\n' itself, so each line is drawn separately at
+                                    // increasing y (matching textBounds' own line-height math).
+                                    val sizePx = maxOf(
+                                        if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f,
+                                        minPx(10f)
+                                    )
+                                    val textPaint = android.graphics.Paint().apply {
                                         color = if (isHighlighted) 0xFFE65100.toInt() else (s.color ?: 0xFF6A1B9A.toInt())
-                                        textSize = maxOf(
-                                            if (s.fontSize > 0f) (s.fontSize * currentPxPerMm()).coerceAtLeast(8f) else 34f,
-                                            minPx(10f)
-                                        )
+                                        textSize = sizePx
                                     }
-                                )
+                                    val lineHeight = sizePx * 1.2f
+                                    s.label.split('\n').forEachIndexed { i, line ->
+                                        drawContext.canvas.nativeCanvas.drawText(line, s.x1, s.y1 + i * lineHeight, textPaint)
+                                    }
+                                }
                                 ShapeKind.FREEHAND, ShapeKind.POLYLINE -> {
                                     val strokeColor = shapeColor(s, linePaint, isHighlighted)
                                     val strokeWidthPx = strokeW(s, 4f, isHighlighted)
@@ -3018,10 +3052,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                                     }
                                 }
                                 ShapeKind.HATCH -> {
+                                    // A true crosshatch (X) — lines at the stored angle AND its
+                                    // perpendicular — reads as fully covering the area at a glance,
+                                    // where a single direction always leaves visible parallel gaps
+                                    // no matter how tight the spacing.
                                     val boundary = SketchPath.parse(s.path).map { (x, y) -> Offset(x, y) }
                                     val hatchColor = shapeColor(s, linePaint, isHighlighted)
                                     val hatchW = strokeW(s, 1f, isHighlighted)
                                     computeHatchLines(boundary, s.x1, s.y1).forEach { (a, b) ->
+                                        drawLine(hatchColor, a, b, strokeWidth = hatchW)
+                                    }
+                                    computeHatchLines(boundary, s.x1 + 90f, s.y1).forEach { (a, b) ->
                                         drawLine(hatchColor, a, b, strokeWidth = hatchW)
                                     }
                                 }
@@ -3363,7 +3404,10 @@ private fun DimensionTextDialog(
         title = { Text("Dimension text") },
         text = {
             Column {
-                OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = false,
+                    minLines = 1, maxLines = 6, modifier = Modifier.fillMaxWidth()
+                )
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
                 OutlinedTextField(
                     value = fontSizeText, onValueChange = { fontSizeText = it }, singleLine = true,
@@ -4041,10 +4085,11 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
             var pickedColor by remember { mutableStateOf(shape.color?.let { Color(it) }) }
             var showHandwrite by remember { mutableStateOf(false) }
             var widthText by remember { mutableStateOf(if (shape.strokeWidth > 0f) trimNum(shape.strokeWidth.toDouble()) else "") }
-            // Reuses SketchShape.major (otherwise only meaningful for ARC) as a LINE's dashed
-            // flag — an internal/reference line style, distinct from a plain solid line, same
-            // "one existing column, no migration" convention IMAGE already uses for x1/y1/x2/y2.
-            var dashed by remember { mutableStateOf(shape.major) }
+            // Reuses SketchShape.label (LINE has no other use for it) as a line style keyword —
+            // "solid" (default/blank), "dashed", "dotted", "dashdot" — same "one existing column,
+            // no migration" convention IMAGE already uses for x1/y1/x2/y2. Falls back to major
+            // (the old boolean dashed-only scheme) for lines saved before styles existed.
+            var style by remember { mutableStateOf(shape.label.ifBlank { if (shape.major) "dashed" else "solid" }) }
             if (showHandwrite) {
                 HandwriteInputDialog(onResult = { text = it.filter { c -> c.isDigit() || c == '.' }; showHandwrite = false }, onDismiss = { showHandwrite = false })
             }
@@ -4067,9 +4112,15 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                            Checkbox(checked = dashed, onCheckedChange = { dashed = it })
-                            Text("Dashed (internal/reference line)")
+                        Text("Line style", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterChip(selected = style == "solid", onClick = { style = "solid" }, label = { Text("Solid") })
+                            FilterChip(selected = style == "dashed", onClick = { style = "dashed" }, label = { Text("Dashed") })
+                            FilterChip(selected = style == "dotted", onClick = { style = "dotted" }, label = { Text("Dotted") })
+                            FilterChip(selected = style == "dashdot", onClick = { style = "dashdot" }, label = { Text("Dash-Dot") })
                         }
                     }
                 },
@@ -4078,8 +4129,9 @@ private fun ShapeEditDialog(shape: SketchShape, unitLabel: String, onConfirm: (S
                         val v = text.toDoubleOrNull()
                         val colorArgb = pickedColor?.toArgb()
                         val widthPx = widthText.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
-                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb, strokeWidth = widthPx, major = dashed))
-                        else onConfirm(shape.copy(confirmed = false, color = colorArgb, strokeWidth = widthPx, major = dashed))
+                        val isDashed = style == "dashed"
+                        if (v != null && v > 0) onConfirm(shape.copy(realLength = displayToMm(v, unitLabel), confirmed = true, color = colorArgb, strokeWidth = widthPx, major = isDashed, label = style))
+                        else onConfirm(shape.copy(confirmed = false, color = colorArgb, strokeWidth = widthPx, major = isDashed, label = style))
                     }) { Text("Confirm") }
                 },
                 dismissButton = {
@@ -4274,7 +4326,10 @@ private fun LabelInputDialog(
         title = { Text(title) },
         text = {
             Column {
-                OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = false,
+                    minLines = 1, maxLines = 6, modifier = Modifier.fillMaxWidth()
+                )
                 TextButton(onClick = { showHandwrite = true }) { Text("Write it by hand") }
                 if (showColorPicker) {
                     ColorSwatchRow(current = pickedColor, onPick = { pickedColor = it })

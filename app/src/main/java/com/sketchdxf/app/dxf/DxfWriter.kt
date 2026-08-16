@@ -78,8 +78,15 @@ object DxfWriter {
                 }
                 ShapeKind.CIRCLE -> listOf(Entity.Circle(sx(s.cx), sy(s.cy), s.r * scale, s.color))
                 ShapeKind.TEXT -> if (s.label.isNotBlank()) {
+                    // DXF's TEXT entity is single-line — a multi-line label (see the editor's own
+                    // '\n'-per-line drawing) becomes one TEXT entity per line instead, stepped
+                    // down by the same line-height ratio the editor draws with, converted from mm
+                    // back into this shape's own pre-scale pixel space via the page's mm-per-pixel.
                     val height = if (s.fontSize > 0f) s.fontSize.toDouble() else 3.0
-                    listOf(Entity.Text(sx(s.x1), sy(s.y1), height, s.label, s.color))
+                    val lineSpacingPx = (height * 1.2 / scale).toFloat()
+                    s.label.split('\n').mapIndexed { i, line ->
+                        Entity.Text(sx(s.x1), sy(s.y1 + i * lineSpacingPx), height, line, s.color)
+                    }
                 } else emptyList()
                 ShapeKind.DIMENSION -> {
                     // Not a live/associative DXF DIMENSION entity — a plain line + text label that
@@ -140,9 +147,10 @@ object DxfWriter {
                     // Same scanline even-odd fill SketchEditorScreen's computeHatchLines draws with,
                     // run here in the shape's own (pre-scale) canvas-pixel space so the exported
                     // segments land exactly where the editor showed them, then mapped through sx/sy
-                    // like every other entity.
+                    // like every other entity. Both directions (a true crosshatch), matching the
+                    // editor's own draw loop.
                     val boundary = SketchPath.parse(s.path)
-                    hatchLines(boundary, s.x1, s.y1).map { (a, b) ->
+                    (hatchLines(boundary, s.x1, s.y1) + hatchLines(boundary, s.x1 + 90f, s.y1)).map { (a, b) ->
                         Entity.Line(sx(a.first), sy(a.second), sx(b.first), sy(b.second), s.color)
                     }
                 }
