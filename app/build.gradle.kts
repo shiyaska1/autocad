@@ -17,8 +17,8 @@ android {
         // blocks anyone whose installed versionCode is below update-config.json's minVersionCode
         // at the repo root — raise minVersionCode there (to this value or lower) to require the
         // update, or leave it as-is/lower to make a release optional.
-        versionCode = 6
-        versionName = "1.4.1"
+        versionCode = 7
+        versionName = "1.4.2"
         vectorDrawables { useSupportLibrary = true }
 
         // Real phones are arm; x86/x86_64 ML Kit native libs are emulator-only dead weight.
@@ -126,7 +126,7 @@ dependencies {
 
     // On-device English (Latin script) text recognition — for OCR'ing a photographed dimension/
     // label instead of typing it by hand. See OcrTextDialog.
-    implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     // EXIF rotation, so a sideways photo detects lines right-side-up.
     implementation("androidx.exifinterface:exifinterface:1.3.7")
