@@ -17,8 +17,8 @@ android {
         // blocks anyone whose installed versionCode is below update-config.json's minVersionCode
         // at the repo root — raise minVersionCode there (to this value or lower) to require the
         // update, or leave it as-is/lower to make a release optional.
-        versionCode = 5
-        versionName = "1.4.0"
+        versionCode = 6
+        versionName = "1.4.1"
         vectorDrawables { useSupportLibrary = true }
 
         // Real phones are arm; x86/x86_64 ML Kit native libs are emulator-only dead weight.
