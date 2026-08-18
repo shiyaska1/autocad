@@ -222,7 +222,20 @@ fun ArMeasureScreen(onBack: () -> Unit) {
                                 val list = points.value
                                 if (list.size >= 2) {
                                     val originX = list[0].worldX; val originZ = list[0].worldZ
-                                    PendingArTrace.set(list.map { (it.worldX - originX) to (it.worldZ - originZ) })
+                                    val relative = list.map { (it.worldX - originX) to (it.worldZ - originZ) }
+                                    // ARCore's world X/Z axes are fixed to wherever the session
+                                    // happened to be facing when tracking started — not to the
+                                    // wall/edge being traced — so a perfectly straight, level line
+                                    // in real life generally lands at some arbitrary diagonal in
+                                    // raw world coordinates. Rotate everything so the first tapped
+                                    // segment (the direction the user actually measured) lands
+                                    // exactly horizontal on the plan; every other point's angle
+                                    // relative to that first segment is preserved untouched.
+                                    val (dx1, dz1) = relative[1]
+                                    val theta = kotlin.math.atan2(dz1, dx1)
+                                    val cosT = kotlin.math.cos(theta); val sinT = kotlin.math.sin(theta)
+                                    val rotated = relative.map { (x, z) -> (x * cosT + z * sinT) to (-x * sinT + z * cosT) }
+                                    PendingArTrace.set(rotated)
                                     onBack()
                                 }
                             },
