@@ -29,11 +29,27 @@ object PreviewRenderer {
         return floatArrayOf(s.x1 + nx, s.y1 + ny, s.x2 + nx, s.y2 + ny)
     }
 
-    fun render(shapes: List<SketchShape>, size: Int = 900): Bitmap {
+    /**
+     * [background], if given, is drawn under the shapes — stretched (preserving its own aspect
+     * ratio, letterboxed) into the exact same bounding box the shapes themselves are fit into.
+     * There's no persisted record of the editor's original viewport size to reconstruct a pixel-
+     * exact overlay from, so this is an approximation: it lines up well whenever the user traced
+     * across the photo's full visible extent (the common case), less so for a sketch that only
+     * covers a small corner of a much larger background.
+     */
+    fun render(shapes: List<SketchShape>, size: Int = 900, background: Bitmap? = null): Bitmap {
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(Color.WHITE)
-        if (shapes.isEmpty()) return bmp
+        if (shapes.isEmpty()) {
+            background?.let { bg ->
+                val fit = min(size.toFloat() / bg.width, size.toFloat() / bg.height)
+                val w = bg.width * fit; val h = bg.height * fit
+                val left = (size - w) / 2f; val top = (size - h) / 2f
+                canvas.drawBitmap(bg, null, RectF(left, top, left + w, top + h), null)
+            }
+            return bmp
+        }
 
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
@@ -86,6 +102,20 @@ object PreviewRenderer {
         fun paintFor(s: SketchShape, default: Paint): Paint =
             if (s.color != null) Paint(default).apply { color = s.color } else default
 
+        background?.let { bg ->
+            val destLeft = px(minX); val destTop = py(minY)
+            val destRight = px(maxX); val destBottom = py(maxY)
+            val boxW = (destRight - destLeft).coerceAtLeast(1f)
+            val boxH = (destBottom - destTop).coerceAtLeast(1f)
+            val bgAspect = bg.width.toFloat() / bg.height.toFloat()
+            val boxAspect = boxW / boxH
+            val drawW: Float; val drawH: Float
+            if (bgAspect > boxAspect) { drawW = boxW; drawH = boxW / bgAspect } else { drawH = boxH; drawW = boxH * bgAspect }
+            val bgLeft = destLeft + (boxW - drawW) / 2f
+            val bgTop = destTop + (boxH - drawH) / 2f
+            canvas.drawBitmap(bg, null, RectF(bgLeft, bgTop, bgLeft + drawW, bgTop + drawH), null)
+        }
+
         shapes.forEach { s ->
             when (s.kind) {
                 // Confirmed lines just draw normally — no automatic length label; a real-world size
@@ -124,5 +154,9 @@ object PreviewRenderer {
 
     fun save(bitmap: Bitmap, file: File) {
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    fun saveJpg(bitmap: Bitmap, file: File) {
+        FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
     }
 }

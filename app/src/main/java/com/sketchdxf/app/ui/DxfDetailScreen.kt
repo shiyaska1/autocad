@@ -47,6 +47,7 @@ import com.sketchdxf.app.data.SketchSource
 import com.sketchdxf.app.data.SketchWork
 import com.sketchdxf.app.dxf.PdfPageRenderer
 import com.sketchdxf.app.dxf.PendingSketchEditor
+import com.sketchdxf.app.dxf.PreviewRenderer
 import com.sketchdxf.app.dxf.SketchAttachmentStore
 import com.sketchdxf.app.ui.common.ImageViewerDialog
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +65,8 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
     var work by remember { mutableStateOf<SketchWork?>(null) }
     var sources by remember { mutableStateOf<List<SketchSource>>(emptyList()) }
     var showPreview by remember { mutableStateOf(false) }
+    var showJpgChoice by remember { mutableStateOf(false) }
+    var jpgExporting by remember { mutableStateOf(false) }
 
     LaunchedEffect(workId) {
         work = dao.work(workId)
@@ -90,22 +93,23 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
         return if (DownloadSaver.save(context, f, name, mime)) "Saved to Downloads: $name" else "Could not save the file"
     }
 
+    // baseImagePath/backgroundCleared, if set, are the editor's own explicit choice (Set as
+    // background / Delete background / Insert Picture "use as background?") and always win.
+    // Otherwise, fall back to re-deriving the original reference photo/PDF page (if any) so an
+    // untouched sketch still resolves the background it was traced from — a PDF source has no
+    // ready-made background bitmap (only the original PDF was kept), so its first page has to be
+    // re-rendered the same way DxfHomeScreen did when the sketch was first created.
+    suspend fun resolveBackgroundPath(w: SketchWork): String? = when {
+        w.baseImagePath.isNotBlank() -> w.baseImagePath
+        w.backgroundCleared -> null
+        else -> withContext(Dispatchers.Default) { rebuildBackgroundPath(context, sources) }
+    }
+
     fun goEdit() {
         val w = work ?: return
         scope.launch {
             val shapes = dao.shapesFor(w.id)
-            // baseImagePath/backgroundCleared, if set, are the editor's own explicit choice (Set
-            // as background / Delete background / Insert Picture "use as background?") and always
-            // win. Otherwise, fall back to re-deriving the original reference photo/PDF page (if
-            // any) so continuing an untouched sketch still shows the background it was traced
-            // from — a PDF source has no ready-made background bitmap (only the original PDF was
-            // kept), so its first page has to be re-rendered the same way DxfHomeScreen did when
-            // the sketch was first created.
-            val bg = when {
-                w.baseImagePath.isNotBlank() -> w.baseImagePath
-                w.backgroundCleared -> null
-                else -> withContext(Dispatchers.Default) { rebuildBackgroundPath(context, sources) }
-            }
+            val bg = resolveBackgroundPath(w)
             PendingSketchEditor.set(
                 workId = w.id, createdAt = w.createdAt, name = w.name,
                 baseImagePath = bg, shapes = shapes, sources = sources,
@@ -114,6 +118,42 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
             )
             onEdit()
         }
+    }
+
+    fun exportJpg(includeBackground: Boolean) {
+        val w = work ?: return
+        jpgExporting = true
+        scope.launch {
+            val shapes = withContext(Dispatchers.IO) { dao.shapesFor(w.id) }
+            val bgBitmap = if (includeBackground) {
+                resolveBackgroundPath(w)?.let { path -> withContext(Dispatchers.IO) { BitmapFactory.decodeFile(path) } }
+            } else null
+            val bitmap = withContext(Dispatchers.Default) { PreviewRenderer.render(shapes, size = 1600, background = bgBitmap) }
+            val suffix = if (includeBackground) "_with_background" else "_no_background"
+            val file = SketchAttachmentStore.newFile(context, "export", "jpg")
+            withContext(Dispatchers.IO) { PreviewRenderer.saveJpg(bitmap, file) }
+            val msg = download(file.absolutePath, "${w.name}$suffix.jpg", "image/jpeg")
+            jpgExporting = false
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    if (showJpgChoice) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showJpgChoice = false },
+            title = { Text("Save as JPG") },
+            text = { Text("Include the traced background photo, or just the drawing lines?") },
+            confirmButton = {
+                Button(onClick = { showJpgChoice = false; exportJpg(includeBackground = true) }) {
+                    Text("With background")
+                }
+            },
+            dismissButton = {
+                Button(onClick = { showJpgChoice = false; exportJpg(includeBackground = false) }) {
+                    Text("Without background")
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -158,6 +198,17 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
                 Text(File(w.dxfPath).name.ifBlank { "Not generated" }, modifier = Modifier.weight(1f), maxLines = 1)
                 IconButton(onClick = { download(w.dxfPath, "${w.name}.dxf", "application/dxf") }) { Icon(Icons.Filled.Download, "Download") }
                 IconButton(onClick = { share(w.dxfPath, "application/dxf") }) { Icon(Icons.Filled.Share, "Share") }
+            }
+
+            Text("Image (JPG)", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (jpgExporting) "Generating…" else "Save the drawing as a JPG image",
+                    modifier = Modifier.weight(1f), maxLines = 1, color = MaterialTheme.colorScheme.outline
+                )
+                IconButton(onClick = { showJpgChoice = true }, enabled = !jpgExporting) {
+                    Icon(Icons.Filled.Download, "Save as JPG")
+                }
             }
 
             if (sources.isNotEmpty()) {
