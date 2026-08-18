@@ -22,7 +22,17 @@ data class SketchWork(
     /** "mm" or "cm" — the unit every dimension typed into this work is shown/entered in. Defaults
      *  to "mm" so migrated pre-existing rows (created before cm support) keep reading the way they
      *  were originally saved; new works are created with "cm" explicitly (see SketchEditorScreen). */
-    val unit: String = "mm"
+    val unit: String = "mm",
+    /** Explicit trace-over background image path, or "" to fall back to re-deriving one from
+     *  [SketchSource] (the original picked/captured photo/PDF this work started from) — set
+     *  whenever the editor's "Set as background"/Insert Picture "use as background?" actions
+     *  change the background away from that default. See [backgroundCleared] for the third state
+     *  (explicitly no background at all). */
+    val baseImagePath: String = "",
+    /** True once the editor's "Delete background" action has explicitly removed the background —
+     *  distinct from [baseImagePath] being blank on a work that simply never had one, so reopening
+     *  doesn't resurrect the sources-derived background the user deliberately cleared. */
+    val backgroundCleared: Boolean = false
 )
 
 /** The original photo(s)/PDF page(s) the user picked or captured for a work. */

@@ -22,6 +22,10 @@ object PendingSketchEditor {
     /** "mm" or "cm". Defaults to "cm" for a brand-new work; opening an existing one passes its
      *  own stored unit instead, so already-saved dimensions keep reading the way they were typed. */
     @Volatile var unit: String = "cm"
+    /** Whether [baseImagePath] being null means "explicitly deleted" (true) rather than "never
+     *  had one / not yet resolved" (false) — see SketchWork.backgroundCleared and the editor's own
+     *  backgroundExplicitlyCleared, which this seeds so a re-save doesn't accidentally un-clear it. */
+    @Volatile var backgroundCleared: Boolean = false
 
     fun set(
         workId: Long,
@@ -32,7 +36,8 @@ object PendingSketchEditor {
         sources: List<SketchSource>,
         oldDxfPath: String = "",
         oldPreviewPath: String = "",
-        unit: String = "cm"
+        unit: String = "cm",
+        backgroundCleared: Boolean = false
     ) {
         this.workId = workId
         this.createdAt = createdAt
@@ -43,5 +48,6 @@ object PendingSketchEditor {
         this.oldDxfPath = oldDxfPath
         this.oldPreviewPath = oldPreviewPath
         this.unit = unit
+        this.backgroundCleared = backgroundCleared
     }
 }

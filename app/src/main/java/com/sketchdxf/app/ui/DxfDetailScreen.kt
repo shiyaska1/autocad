@@ -94,16 +94,23 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
         val w = work ?: return
         scope.launch {
             val shapes = dao.shapesFor(w.id)
-            // Re-attach the original reference photo/PDF page (if any) so continuing a sketch
-            // still shows the background it was traced from, instead of a blank canvas. A PDF
-            // source has no ready-made background bitmap (only the original PDF was kept) — its
-            // first page has to be re-rendered the same way DxfHomeScreen did when the sketch was
-            // first created.
-            val bg = withContext(Dispatchers.Default) { rebuildBackgroundPath(context, sources) }
+            // baseImagePath/backgroundCleared, if set, are the editor's own explicit choice (Set
+            // as background / Delete background / Insert Picture "use as background?") and always
+            // win. Otherwise, fall back to re-deriving the original reference photo/PDF page (if
+            // any) so continuing an untouched sketch still shows the background it was traced
+            // from — a PDF source has no ready-made background bitmap (only the original PDF was
+            // kept), so its first page has to be re-rendered the same way DxfHomeScreen did when
+            // the sketch was first created.
+            val bg = when {
+                w.baseImagePath.isNotBlank() -> w.baseImagePath
+                w.backgroundCleared -> null
+                else -> withContext(Dispatchers.Default) { rebuildBackgroundPath(context, sources) }
+            }
             PendingSketchEditor.set(
                 workId = w.id, createdAt = w.createdAt, name = w.name,
                 baseImagePath = bg, shapes = shapes, sources = sources,
-                oldDxfPath = w.dxfPath, oldPreviewPath = w.previewPath, unit = w.unit
+                oldDxfPath = w.dxfPath, oldPreviewPath = w.previewPath, unit = w.unit,
+                backgroundCleared = w.backgroundCleared
             )
             onEdit()
         }

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.HideImage
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -209,6 +210,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var createdAt by remember { mutableStateOf(0L) }
     var name by remember { mutableStateOf("") }
     var baseImagePath by remember { mutableStateOf<String?>(null) }
+    // Whether baseImagePath being null means "explicitly deleted" (Delete background) rather
+    // than "never had one" — seeded from PendingSketchEditor so re-saving an already-cleared
+    // background doesn't accidentally un-clear it, see save().
+    var backgroundExplicitlyCleared by remember { mutableStateOf(false) }
+    var showDeleteBackgroundConfirm by remember { mutableStateOf(false) }
     var oldDxfPath by remember { mutableStateOf("") }
     var oldPreviewPath by remember { mutableStateOf("") }
     var unit by remember { mutableStateOf("cm") }
@@ -249,6 +255,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         createdAt = PendingSketchEditor.createdAt
         name = PendingSketchEditor.name
         baseImagePath = PendingSketchEditor.baseImagePath
+        backgroundExplicitlyCleared = PendingSketchEditor.backgroundCleared
         oldDxfPath = PendingSketchEditor.oldDxfPath
         oldPreviewPath = PendingSketchEditor.oldPreviewPath
         unit = PendingSketchEditor.unit
@@ -440,6 +447,10 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     var showImageSourceDialog by remember { mutableStateOf(false) }
     var pendingImagePath by remember { mutableStateOf<String?>(null) }
     var pendingImageAspect by remember { mutableStateOf<Float?>(null) }
+    // Asked right after any picked/captured photo is copied in — its answer decides whether the
+    // file becomes the background (baseImagePath) or goes through the normal tap-to-place object
+    // flow (pendingImagePath/pendingImageAspect), see the dialog near the other Insert Image state.
+    var pendingBackgroundChoicePath by remember { mutableStateOf<String?>(null) }
     // OCR Text: same source-picker step as Insert Image, but leads into OcrTextDialog (crop +
     // recognize) instead of dropping the photo itself onto the canvas; pendingOcrText then
     // prefills the normal Text tool's label dialog once the recognized text is confirmed, so the
@@ -1530,7 +1541,8 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 SketchWork(
                     id = id, name = finalName, createdAt = if (createdAt > 0) createdAt else now,
                     updatedAt = now, dxfPath = dxfFile.absolutePath, previewPath = previewFile.absolutePath,
-                    status = "FINALIZED", unit = unit
+                    status = "FINALIZED", unit = unit,
+                    baseImagePath = baseImagePath ?: "", backgroundCleared = backgroundExplicitlyCleared
                 )
             )
             busy = false
@@ -1549,6 +1561,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 }
             },
             dismissButton = { TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") } }
+        )
+    }
+    if (showDeleteBackgroundConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteBackgroundConfirm = false },
+            title = { Text("Delete background image?") },
+            text = { Text("Removes the trace-over background from this sketch. Your drawn shapes aren't affected.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    baseImagePath = null; backgroundExplicitlyCleared = true
+                    showDeleteBackgroundConfirm = false
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteBackgroundConfirm = false }) { Text("Cancel") } }
         )
     }
     if (editingIndex >= 0 && editingIndex < shapes.size) {
@@ -1878,17 +1904,13 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
     }
 
     // Insert Image: copies the picked/captured photo into app storage (so it survives even once
-    // the original gallery item/camera temp file is gone), reads just its pixel dimensions for
-    // an aspect-correct default placement size, then arms Tool.IMAGE so the next canvas tap drops
-    // it — same two-step "pick, then tap to place" flow as Insert Block.
+    // the original gallery item/camera temp file is gone), then asks whether it should become the
+    // whole canvas's trace-over background or a regular movable/scalable object — see
+    // pendingBackgroundChoicePath and its dialog below.
     fun handleImagePicked(uri: Uri?) {
         if (uri == null) return
         val path = SketchAttachmentStore.copyIn(context, uri)?.path ?: return
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(path, bounds)
-        pendingImageAspect = if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth.toFloat() / bounds.outHeight else 1f
-        pendingImagePath = path
-        tool = Tool.IMAGE
+        pendingBackgroundChoicePath = path
     }
     val imageCamera = rememberImageCamera { uri -> handleImagePicked(uri) }
     val imageGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -1921,6 +1943,29 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
             },
             onFile = { showImageSourceDialog = false; imageFilePicker.launch(arrayOf("image/*")) },
             onCancel = { showImageSourceDialog = false }
+        )
+    }
+    pendingBackgroundChoicePath?.let { path ->
+        AlertDialog(
+            onDismissRequest = { pendingBackgroundChoicePath = null },
+            title = { Text("Use as background?") },
+            text = { Text("A background covers the whole canvas to trace over. Otherwise it's placed as its own object you can move, scale or delete.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    baseImagePath = path; backgroundExplicitlyCleared = false
+                    pendingBackgroundChoicePath = null
+                }) { Text("Use as background") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(path, bounds)
+                    pendingImageAspect = if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth.toFloat() / bounds.outHeight else 1f
+                    pendingImagePath = path
+                    tool = Tool.IMAGE
+                    pendingBackgroundChoicePath = null
+                }) { Text("Place as object") }
+            }
         )
     }
     if (showOcrSourceDialog) {
@@ -2029,6 +2074,11 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) { Icon(Icons.Filled.Undo, "Undo") }
                         IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) { Icon(Icons.Filled.Redo, "Redo") }
                         IconButton(onClick = { fitToScreen() }) { Icon(Icons.Filled.FitScreen, "Fit all shapes on screen") }
+                        if (baseImagePath != null) {
+                            IconButton(onClick = { showDeleteBackgroundConfirm = true }) {
+                                Icon(Icons.Filled.HideImage, "Delete background image")
+                            }
+                        }
                         IconButton(onClick = { fullscreenCanvas = true }) { Icon(Icons.Filled.Fullscreen, "Fullscreen canvas") }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -2221,6 +2271,20 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                         label = { Text("Hatch") }
                     )
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
+                    if (selectedIndices.size == 1 && shapes.getOrNull(selectedIndices[0])?.kind == ShapeKind.IMAGE) {
+                        FilterChip(
+                            selected = false,
+                            onClick = {
+                                val idx = selectedIndices[0]
+                                val picturePath = shapes[idx].label
+                                pushUndo()
+                                shapes.removeAt(idx)
+                                selectedIndices.clear()
+                                baseImagePath = picturePath; backgroundExplicitlyCleared = false
+                            },
+                            label = { Text("Set as background") }
+                        )
+                    }
                     FilterChip(
                         selected = false,
                         onClick = {
