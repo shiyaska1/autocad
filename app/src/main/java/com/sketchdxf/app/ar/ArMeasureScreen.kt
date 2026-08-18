@@ -154,8 +154,7 @@ fun ArMeasureScreen(onBack: () -> Unit) {
                             ArRenderer(
                                 sessionProvider = { session },
                                 pendingTap = pendingTap,
-                                @Suppress("DEPRECATION")
-                                displayRotationProvider = { (ctx as? Activity)?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0 },
+                                displayRotationProvider = { currentDisplayRotation(ctx) },
                                 onFrameResult = { pts, dist, isTracking ->
                                     points.value = pts
                                     lastDistanceM = dist
@@ -229,6 +228,14 @@ fun ArMeasureScreen(onBack: () -> Unit) {
         }
     }
 }
+
+/** windowManager.defaultDisplay is deprecated (API 30+ prefers Context.display), but this app's
+ *  minSdk (26) needs the older, broadly-compatible path — @Suppress can't attach to an argument
+ *  inside a call like a named parameter, only to a whole declaration, hence this being its own
+ *  function rather than an inline lambda where it was originally written. */
+@Suppress("DEPRECATION")
+private fun currentDisplayRotation(ctx: android.content.Context): Int =
+    (ctx as? Activity)?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
 
 /** One tapped, anchored real-world point. */
 internal data class AnchoredPoint(val anchor: Anchor, val worldX: Float, val worldY: Float, val worldZ: Float)
