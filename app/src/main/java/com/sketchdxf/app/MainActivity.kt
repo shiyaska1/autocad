@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.navigation.NavType
@@ -16,7 +17,9 @@ import androidx.navigation.navArgument
 import androidx.navigation.compose.rememberNavController
 import com.sketchdxf.app.ui.BackupScreen
 import com.sketchdxf.app.ui.BlockLibraryScreen
+import com.sketchdxf.app.BuildConfig
 import com.sketchdxf.app.data.PendingUpdateInfo
+import com.sketchdxf.app.data.UpdateChecker
 import com.sketchdxf.app.ui.BootScreen
 import com.sketchdxf.app.ui.DxfDetailScreen
 import com.sketchdxf.app.ui.DxfHomeScreen
@@ -29,6 +32,8 @@ import com.sketchdxf.app.ui.PdfToolsScreen
 import com.sketchdxf.app.ar.ArMeasureScreen
 import com.sketchdxf.app.ui.SketchEditorScreen
 import com.sketchdxf.app.update.AppUpdater
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,6 +66,22 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun SketchDxfApp() {
     val nav = rememberNavController()
+
+    // Runs once, in the background, independent of BootScreen's own (purely local/instant)
+    // routing — this used to be an awaited network call at the front of every single boot,
+    // which meant every app open paid a real network round-trip (up to UpdateChecker's own
+    // timeout) before showing anything at all. Now the app opens immediately regardless, and
+    // this only ever interrupts (jumping to "force_update" from wherever the user currently is)
+    // in the rare case a forced update is actually found — the common case (nothing forced, or
+    // a slow/offline network) no longer costs anything at startup.
+    LaunchedEffect(Unit) {
+        val update = withContext(Dispatchers.IO) { UpdateChecker.fetch() }
+        if (update != null && BuildConfig.VERSION_CODE < update.minVersionCode) {
+            PendingUpdateInfo.set(update.message, update.updateUrl)
+            nav.navigate("force_update") { popUpTo(0) { inclusive = true } }
+        }
+    }
+
     NavHost(navController = nav, startDestination = "boot") {
         composable("boot") {
             BootScreen(onResolved = { route ->

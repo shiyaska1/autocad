@@ -207,7 +207,9 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit, onArMeasure:
     val scope = rememberCoroutineScope()
     val dao = remember { AppDatabase.get(context).sketchDao() }
     var savedBlocks by remember { mutableStateOf<List<SketchBlock>>(emptyList()) }
-    LaunchedEffect(Unit) { savedBlocks = dao.allBlocks() }
+    // Loaded lazily (see below, once showBlockPicker/showSaveBlockDialog exist) — not on every
+    // editor open, since most sessions never touch Blocks at all.
+    var blocksLoaded by remember { mutableStateOf(false) }
 
     var loaded by remember { mutableStateOf(false) }
     var workId by remember { mutableStateOf(0L) }
@@ -445,6 +447,12 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit, onArMeasure:
     var showBlockPicker by remember { mutableStateOf(false) }
     var pendingBlockInsert by remember { mutableStateOf<SketchBlock?>(null) }
     var insertUseRatio by remember { mutableStateOf(true) }
+    LaunchedEffect(showBlockPicker, showSaveBlockDialog) {
+        if (!blocksLoaded && (showBlockPicker || showSaveBlockDialog)) {
+            savedBlocks = dao.allBlocks()
+            blocksLoaded = true
+        }
+    }
     // Insert Image: showImageSourceDialog offers Camera/Gallery/File; once one of those returns a
     // picked photo, pendingImagePath/pendingImageAspect hold it until the next canvas tap places
     // it (see handleImagePicked and Tool.IMAGE's gesture handler).
