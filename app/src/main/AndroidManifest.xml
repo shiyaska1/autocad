@@ -45,5 +45,9 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- "optional": the app installs and runs fine on devices without ARCore support — only
+             the AR Measure tool checks availability at runtime and explains if it can't run. -->
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+
     </application>
 </manifest>

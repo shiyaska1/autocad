@@ -26,6 +26,7 @@ import com.sketchdxf.app.ui.LicenseScreen
 import com.sketchdxf.app.ui.PdfMergeScreen
 import com.sketchdxf.app.ui.PdfSplitScreen
 import com.sketchdxf.app.ui.PdfToolsScreen
+import com.sketchdxf.app.ar.ArMeasureScreen
 import com.sketchdxf.app.ui.SketchEditorScreen
 import com.sketchdxf.app.update.AppUpdater
 
@@ -121,8 +122,12 @@ private fun SketchDxfApp() {
                 onBack = { nav.popBackStack() },
                 onSaved = { id ->
                     nav.navigate("detail/$id") { popUpTo("list") { inclusive = false } }
-                }
+                },
+                onArMeasure = { nav.navigate("ar_measure") }
             )
+        }
+        composable("ar_measure") {
+            ArMeasureScreen(onBack = { nav.popBackStack() })
         }
         composable(
             route = "detail/{id}",

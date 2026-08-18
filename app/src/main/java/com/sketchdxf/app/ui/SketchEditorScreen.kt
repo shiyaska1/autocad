@@ -98,11 +98,15 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.sketchdxf.app.ar.PendingArTrace
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchArc
@@ -189,7 +193,7 @@ private enum class DimMode { ALIGNED, LINEAR_H, LINEAR_V }
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
+fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit, onArMeasure: () -> Unit) {
     val context = LocalContext.current
     val androidView = LocalView.current
     // The canvas reaches close to the screen edges, so Android's own edge-swipe-back gesture can
@@ -771,6 +775,44 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
         val margin = 48f
         if (screenX in margin..(cw - margin) && screenY in margin..(ch - margin)) return
         viewOffset = clampViewOffset(Offset(cw / 2f - p.x * viewScale, ch / 2f - p.y * viewScale), viewScale)
+    }
+
+    // Consumes an AR Measure trace as soon as this screen becomes the active destination again
+    // (LocalLifecycleOwner here is scoped to this NavHost back-stack entry, so ON_RESUME fires
+    // both on first entry and every time navigating back from AR Measure lands here) — adds each
+    // tapped segment as a real, already-confirmed-length LINE, scaled to this drawing's current
+    // px-per-mm and centred on wherever the view is currently looking.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val pts = PendingArTrace.consume()
+                if (pts.size >= 2) {
+                    pushUndo()
+                    val cw = canvasSize.width.toFloat().takeIf { it > 0f } ?: 800f
+                    val ch = canvasSize.height.toFloat().takeIf { it > 0f } ?: 800f
+                    val centerContent = Offset((cw / 2f - viewOffset.x) / viewScale, (ch / 2f - viewOffset.y) / viewScale)
+                    val pxPerMm = currentPxPerMm()
+                    var firstCanvasPt: Offset? = null
+                    pts.zipWithNext { (x1, z1), (x2, z2) ->
+                        val lengthMm = hypotF(x2 - x1, z2 - z1) * 1000f
+                        val a = Offset(centerContent.x + x1 * 1000f * pxPerMm, centerContent.y + z1 * 1000f * pxPerMm)
+                        val b = Offset(centerContent.x + x2 * 1000f * pxPerMm, centerContent.y + z2 * 1000f * pxPerMm)
+                        if (firstCanvasPt == null) firstCanvasPt = a
+                        shapes.add(
+                            SketchShape(
+                                workId = 0, kind = ShapeKind.LINE, x1 = a.x, y1 = a.y, x2 = b.x, y2 = b.y,
+                                confirmed = true, realLength = lengthMm.toDouble(),
+                                color = currentColor?.toArgb(), strokeWidth = currentStrokeWidth
+                            )
+                        )
+                    }
+                    firstCanvasPt?.let { ensurePointVisible(it) }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     /** Resets pan/zoom so every shape — including anything currently panned/zoomed out of view —
@@ -2172,6 +2214,7 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit) {
                 FilterChip(selected = tool == Tool.IMAGE, onClick = { showImageSourceDialog = true },
                     label = { Icon(Icons.Filled.Image, "Insert picture") })
                 FilterChip(selected = false, onClick = { showOcrSourceDialog = true }, label = { Text("OCR Text") })
+                FilterChip(selected = false, onClick = onArMeasure, label = { Text("AR Measure") })
                 FilterChip(
                     selected = false, onClick = { showColorPicker = true },
                     label = {

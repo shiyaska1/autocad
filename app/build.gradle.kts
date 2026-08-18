@@ -131,6 +131,10 @@ dependencies {
     // EXIF rotation, so a sideways photo detects lines right-side-up.
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
+    // ARCore: live camera + real-world 3D point tracking for the AR Measure tool (tap two real-
+    // world points, get the distance between them; convert a tapped sequence into a line drawing).
+    implementation("com.google.ar:core:1.54.0")
+
     // Play in-app updates: forces an update as soon as one is published (see AppUpdater). Same
     // dependency/approach as the POS Billing and Kerala Lottery apps.
     implementation("com.google.android.play:app-update-ktx:2.1.0")
