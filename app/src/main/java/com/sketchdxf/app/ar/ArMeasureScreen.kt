@@ -52,6 +52,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.SessionPausedException
 import com.google.ar.core.exceptions.UnavailableException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -174,55 +175,60 @@ fun ArMeasureScreen(onBack: () -> Unit) {
             )
         }
 
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
-            }
-        }
-
-        Column(
-            Modifier.fillMaxWidth().align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.55f)).padding(16.dp)
-        ) {
-            if (!hasCameraPermission) {
-                Text("Camera permission is needed for AR Measure.", color = Color.White)
-            } else if (arError != null) {
-                Text(arError ?: "", color = Color(0xFFFF8A80))
-            } else {
-                Text(
-                    if (tracking) "${points.value.size} point(s) tapped" else "Move your phone slowly to find surfaces…",
-                    color = Color.White, style = MaterialTheme.typography.bodyMedium
-                )
-                lastDistanceM?.let { d ->
-                    Text(
-                        "Last segment: ${"%.2f".format(d)} m (${"%.0f".format(d * 1000)} mm)",
-                        color = Color.White, style = MaterialTheme.typography.titleMedium
-                    )
+        // Everything anchored to the top instead of the bottom — a bottom-aligned panel sits
+        // right where gesture-nav/3-button nav bars live on most phones and gets rendered
+        // underneath them, making the buttons unreachable.
+        Column(Modifier.fillMaxWidth().align(Alignment.TopCenter)) {
+            Row(
+                Modifier.fillMaxWidth().padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
                 }
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        // Only the renderer's own point list (rebuilt from live hit-tests on the
-                        // GL thread) is authoritative — this just queues the same way a tap does,
-                        // rather than touching the Compose-side mirror directly, which the very
-                        // next frame's onFrameResult would otherwise just overwrite right back.
-                        onClick = { pendingTap.set(UNDO_SENTINEL) },
-                        enabled = points.value.isNotEmpty()
-                    ) { Text("Undo point") }
-                    Button(
-                        onClick = {
-                            val list = points.value
-                            if (list.size >= 2) {
-                                val originX = list[0].worldX; val originZ = list[0].worldZ
-                                PendingArTrace.set(list.map { (it.worldX - originX) to (it.worldZ - originZ) })
-                                onBack()
-                            }
-                        },
-                        enabled = points.value.size >= 2
-                    ) { Text("Add to drawing") }
+            }
+
+            Column(
+                Modifier.fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f)).padding(16.dp)
+            ) {
+                if (!hasCameraPermission) {
+                    Text("Camera permission is needed for AR Measure.", color = Color.White)
+                } else if (arError != null) {
+                    Text(arError ?: "", color = Color(0xFFFF8A80))
+                } else {
+                    Text(
+                        if (tracking) "${points.value.size} point(s) tapped" else "Move your phone slowly to find surfaces…",
+                        color = Color.White, style = MaterialTheme.typography.bodyMedium
+                    )
+                    lastDistanceM?.let { d ->
+                        Text(
+                            "Last segment: ${"%.2f".format(d)} m (${"%.0f".format(d * 1000)} mm)",
+                            color = Color.White, style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            // Only the renderer's own point list (rebuilt from live hit-tests on the
+                            // GL thread) is authoritative — this just queues the same way a tap does,
+                            // rather than touching the Compose-side mirror directly, which the very
+                            // next frame's onFrameResult would otherwise just overwrite right back.
+                            onClick = { pendingTap.set(UNDO_SENTINEL) },
+                            enabled = points.value.isNotEmpty()
+                        ) { Text("Undo point") }
+                        Button(
+                            onClick = {
+                                val list = points.value
+                                if (list.size >= 2) {
+                                    val originX = list[0].worldX; val originZ = list[0].worldZ
+                                    PendingArTrace.set(list.map { (it.worldX - originX) to (it.worldZ - originZ) })
+                                    onBack()
+                                }
+                            },
+                            enabled = points.value.size >= 2
+                        ) { Text("Add to drawing") }
+                    }
                 }
             }
         }
@@ -316,7 +322,16 @@ internal class ArRenderer(
         // device rotates while this screen is open.
         session.setDisplayGeometry(displayRotationProvider(), viewportWidth, viewportHeight)
         session.setCameraTextureName(cameraTextureId)
-        val frame: Frame = try { session.update() } catch (e: CameraNotAvailableException) { return }
+        // "Add to drawing"/Back can pop this screen (pausing the session) a frame or two before
+        // the GLSurfaceView's own render thread stops calling onDrawFrame — session.update() then
+        // throws SessionPausedException. Not a real error, just a lifecycle race; skip the frame.
+        val frame: Frame = try {
+            session.update()
+        } catch (e: CameraNotAvailableException) {
+            return
+        } catch (e: SessionPausedException) {
+            return
+        }
 
         drawCameraBackground(frame)
 
@@ -331,7 +346,14 @@ internal class ArRenderer(
         if (tracking) {
             if (tap != null && tap !== UNDO_SENTINEL) {
                 val hits = frame.hitTest(tap[0], tap[1])
-                val hit = hits.firstOrNull()
+                // hitTest() mixes detected-plane hits, depth-sensor hits, and raw feature-point
+                // hits in one list. A feature point is just a noisy triangulated speck — picking
+                // one of those first is exactly what produces wild outliers (e.g. a real 10cm tap
+                // resolving to a feature point 2+ metres away). Prefer the much more reliable
+                // Plane/DepthPoint hits and only fall back to a feature point if neither exists.
+                val hit = hits.firstOrNull { it.trackable is com.google.ar.core.Plane }
+                    ?: hits.firstOrNull { it.trackable is com.google.ar.core.DepthPoint }
+                    ?: hits.firstOrNull()
                 if (hit != null) {
                     val anchor = hit.createAnchor()
                     val p = anchor.pose
