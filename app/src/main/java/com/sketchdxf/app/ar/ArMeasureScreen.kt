@@ -243,8 +243,16 @@ fun ArMeasureScreen(onBack: () -> Unit) {
 private fun currentDisplayRotation(ctx: android.content.Context): Int =
     (ctx as? Activity)?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
 
-/** One tapped, anchored real-world point. */
-internal data class AnchoredPoint(val anchor: Anchor, val worldX: Float, val worldY: Float, val worldZ: Float)
+/** One tapped, anchored real-world point. worldX/Y/Z read the anchor's pose live rather than
+ *  caching it from the moment of the tap — ARCore keeps refining an anchor's estimated position
+ *  as it tracks more of the scene (loop closure, better plane fits, etc.), and a cached snapshot
+ *  never picks up those corrections, which is what made points visibly drift away from their real
+ *  on-screen spot over time instead of staying locked to the camera image. */
+internal class AnchoredPoint(val anchor: Anchor) {
+    val worldX: Float get() = anchor.pose.tx()
+    val worldY: Float get() = anchor.pose.ty()
+    val worldZ: Float get() = anchor.pose.tz()
+}
 
 /** Sentinel the [ArRenderer]'s pending-tap queue recognizes as "remove the last point" instead of
  *  a screen coordinate to hit-test — identified by reference (===), not its (unused) contents. */
@@ -355,9 +363,7 @@ internal class ArRenderer(
                     ?: hits.firstOrNull { it.trackable is com.google.ar.core.DepthPoint }
                     ?: hits.firstOrNull()
                 if (hit != null) {
-                    val anchor = hit.createAnchor()
-                    val p = anchor.pose
-                    points.add(AnchoredPoint(anchor, p.tx(), p.ty(), p.tz()))
+                    points.add(AnchoredPoint(hit.createAnchor()))
                 }
             }
 
