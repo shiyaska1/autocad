@@ -2322,6 +2322,17 @@ fun SketchEditorScreen(onBack: () -> Unit, onSaved: (Long) -> Unit, onArMeasure:
                         label = { Text("Hatch") }
                     )
                     FilterChip(selected = false, onClick = { showSaveBlockDialog = true }, label = { Text("Save Block") })
+                    if (selectedIndices.size == 1 && shapes.getOrNull(selectedIndices[0])?.kind.let { it == ShapeKind.TEXT || it == ShapeKind.DIMENSION }) {
+                        // Editing text is inherently a single-shape action, so it doesn't fit Box
+                        // Select's usual group-action model — this just opens the same edit dialog
+                        // tapping the shape with the (other) Select tool would, without needing to
+                        // switch tools first.
+                        FilterChip(
+                            selected = false,
+                            onClick = { editingIndex = selectedIndices[0] },
+                            label = { Text("Edit text") }
+                        )
+                    }
                     if (selectedIndices.size == 1 && shapes.getOrNull(selectedIndices[0])?.kind == ShapeKind.IMAGE) {
                         FilterChip(
                             selected = false,
