@@ -25,4 +25,22 @@ class AppPrefs(context: Context) {
     var licensed: Boolean
         get() = p.getBoolean("licensed", false)
         set(v) { p.edit().putBoolean("licensed", v).apply() }
+
+    /** Wall-clock time (millis) of the last successful forced-update config fetch, or 0 if
+     *  never fetched. [UpdateChecker] uses this to avoid hitting the network on every launch. */
+    var updateCheckedAt: Long
+        get() = p.getLong("update_checked_at", 0L)
+        set(v) { p.edit().putLong("update_checked_at", v).apply() }
+
+    var cachedMinVersionCode: Int
+        get() = p.getInt("update_min_version_code", 0)
+        set(v) { p.edit().putInt("update_min_version_code", v).apply() }
+
+    var cachedUpdateMessage: String
+        get() = p.getString("update_message", "") ?: ""
+        set(v) { p.edit().putString("update_message", v).apply() }
+
+    var cachedUpdateUrl: String
+        get() = p.getString("update_url", "") ?: ""
+        set(v) { p.edit().putString("update_url", v).apply() }
 }

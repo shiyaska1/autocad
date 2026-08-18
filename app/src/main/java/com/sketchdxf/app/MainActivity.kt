@@ -9,6 +9,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -18,6 +19,7 @@ import androidx.navigation.compose.rememberNavController
 import com.sketchdxf.app.ui.BackupScreen
 import com.sketchdxf.app.ui.BlockLibraryScreen
 import com.sketchdxf.app.BuildConfig
+import com.sketchdxf.app.data.AppPrefs
 import com.sketchdxf.app.data.PendingUpdateInfo
 import com.sketchdxf.app.data.UpdateChecker
 import com.sketchdxf.app.ui.BootScreen
@@ -66,6 +68,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun SketchDxfApp() {
     val nav = rememberNavController()
+    val context = LocalContext.current
 
     // Runs once, in the background, independent of BootScreen's own (purely local/instant)
     // routing — this used to be an awaited network call at the front of every single boot,
@@ -73,9 +76,10 @@ private fun SketchDxfApp() {
     // timeout) before showing anything at all. Now the app opens immediately regardless, and
     // this only ever interrupts (jumping to "force_update" from wherever the user currently is)
     // in the rare case a forced update is actually found — the common case (nothing forced, or
-    // a slow/offline network) no longer costs anything at startup.
+    // a slow/offline network) no longer costs anything at startup. UpdateChecker.fetchCached
+    // also only hits the network once per 24h, serving the cached result the rest of the time.
     LaunchedEffect(Unit) {
-        val update = withContext(Dispatchers.IO) { UpdateChecker.fetch() }
+        val update = withContext(Dispatchers.IO) { UpdateChecker.fetchCached(AppPrefs(context)) }
         if (update != null && BuildConfig.VERSION_CODE < update.minVersionCode) {
             PendingUpdateInfo.set(update.message, update.updateUrl)
             nav.navigate("force_update") { popUpTo(0) { inclusive = true } }
