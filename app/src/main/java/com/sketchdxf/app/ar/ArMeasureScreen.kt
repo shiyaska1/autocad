@@ -12,6 +12,7 @@ import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -87,6 +90,7 @@ fun ArMeasureScreen(onBack: () -> Unit) {
     val points = remember { mutableStateOf<List<AnchoredPoint>>(emptyList()) }
     var lastDistanceM by remember { mutableStateOf<Float?>(null) }
     var tracking by remember { mutableStateOf(false) }
+    var reticleStatus by remember { mutableStateOf(ReticleStatus.NONE) }
     val pendingTap = remember { AtomicReference<FloatArray?>(null) }
 
     // Session lifecycle: created once permission is granted, resumed/paused with the host
@@ -156,10 +160,11 @@ fun ArMeasureScreen(onBack: () -> Unit) {
                                 sessionProvider = { session },
                                 pendingTap = pendingTap,
                                 displayRotationProvider = { currentDisplayRotation(ctx) },
-                                onFrameResult = { pts, dist, isTracking ->
+                                onFrameResult = { pts, dist, isTracking, reticle ->
                                     points.value = pts
                                     lastDistanceM = dist
                                     tracking = isTracking
+                                    reticleStatus = reticle
                                 }
                             )
                         )
@@ -172,6 +177,20 @@ fun ArMeasureScreen(onBack: () -> Unit) {
                         }
                     }
                 }
+            )
+
+            // Live surface indicator at screen centre — green means whatever's right there is a
+            // properly detected, tracked surface (a tap here should be reliable); amber means only
+            // a noisy raw feature point is available (usable, but expect more error); red/grey
+            // means nothing trackable yet, keep moving the phone slowly before tapping.
+            val reticleColor = when (reticleStatus) {
+                ReticleStatus.PLANE -> Color(0xFF4CAF50)
+                ReticleStatus.FEATURE -> Color(0xFFFFC107)
+                ReticleStatus.NONE -> Color(0xFFE53935)
+            }
+            Box(
+                Modifier.align(Alignment.Center).size(22.dp)
+                    .border(3.dp, reticleColor, CircleShape)
             )
         }
 
@@ -221,21 +240,16 @@ fun ArMeasureScreen(onBack: () -> Unit) {
                             onClick = {
                                 val list = points.value
                                 if (list.size >= 2) {
+                                    // Deliberately NOT auto-rotated: an earlier version forced the
+                                    // first tapped segment to always land horizontal, which fixed a
+                                    // horizontal trace but broke a vertical one — the app has no way
+                                    // to know which orientation you actually intended. This keeps
+                                    // the real angles between everything you tapped exactly as
+                                    // measured; use the editor's own Rotate tool (Ortho on for 90°
+                                    // snapping) afterward to turn the inserted lines to match your
+                                    // drawing, in whichever direction that actually is.
                                     val originX = list[0].worldX; val originZ = list[0].worldZ
-                                    val relative = list.map { (it.worldX - originX) to (it.worldZ - originZ) }
-                                    // ARCore's world X/Z axes are fixed to wherever the session
-                                    // happened to be facing when tracking started — not to the
-                                    // wall/edge being traced — so a perfectly straight, level line
-                                    // in real life generally lands at some arbitrary diagonal in
-                                    // raw world coordinates. Rotate everything so the first tapped
-                                    // segment (the direction the user actually measured) lands
-                                    // exactly horizontal on the plan; every other point's angle
-                                    // relative to that first segment is preserved untouched.
-                                    val (dx1, dz1) = relative[1]
-                                    val theta = kotlin.math.atan2(dz1, dx1)
-                                    val cosT = kotlin.math.cos(theta); val sinT = kotlin.math.sin(theta)
-                                    val rotated = relative.map { (x, z) -> (x * cosT + z * sinT) to (-x * sinT + z * cosT) }
-                                    PendingArTrace.set(rotated)
+                                    PendingArTrace.set(list.map { (it.worldX - originX) to (it.worldZ - originZ) })
                                     onBack()
                                 }
                             },
@@ -267,6 +281,11 @@ internal class AnchoredPoint(val anchor: Anchor) {
     val worldZ: Float get() = anchor.pose.tz()
 }
 
+/** What's currently under the centre-screen reticle, cheapest-to-worst: a detected [Plane] is the
+ *  most reliable thing to tap (its geometry comes from many frames of agreement, not one noisy
+ *  guess), a depth/feature point is usable but noisier, and no hit at all means keep scanning. */
+internal enum class ReticleStatus { NONE, FEATURE, PLANE }
+
 /** Sentinel the [ArRenderer]'s pending-tap queue recognizes as "remove the last point" instead of
  *  a screen coordinate to hit-test — identified by reference (===), not its (unused) contents. */
 private val UNDO_SENTINEL = floatArrayOf(Float.NaN, Float.NaN)
@@ -284,7 +303,7 @@ internal class ArRenderer(
     private val sessionProvider: () -> Session?,
     private val pendingTap: AtomicReference<FloatArray?>,
     private val displayRotationProvider: () -> Int,
-    private val onFrameResult: (points: List<AnchoredPoint>, lastDistanceM: Float?, tracking: Boolean) -> Unit
+    private val onFrameResult: (points: List<AnchoredPoint>, lastDistanceM: Float?, tracking: Boolean, reticle: ReticleStatus) -> Unit
 ) : GLSurfaceView.Renderer {
 
     private var cameraTextureId = 0
@@ -364,20 +383,22 @@ internal class ArRenderer(
         }
 
         val tracking = frame.camera.trackingState == TrackingState.TRACKING
+        var reticle = ReticleStatus.NONE
         if (tracking) {
             if (tap != null && tap !== UNDO_SENTINEL) {
-                val hits = frame.hitTest(tap[0], tap[1])
-                // hitTest() mixes detected-plane hits, depth-sensor hits, and raw feature-point
-                // hits in one list. A feature point is just a noisy triangulated speck — picking
-                // one of those first is exactly what produces wild outliers (e.g. a real 10cm tap
-                // resolving to a feature point 2+ metres away). Prefer the much more reliable
-                // Plane/DepthPoint hits and only fall back to a feature point if neither exists.
-                val hit = hits.firstOrNull { it.trackable is com.google.ar.core.Plane }
-                    ?: hits.firstOrNull { it.trackable is com.google.ar.core.DepthPoint }
-                    ?: hits.firstOrNull()
+                val hit = bestHit(frame.hitTest(tap[0], tap[1]))
                 if (hit != null) {
                     points.add(AnchoredPoint(hit.createAnchor()))
                 }
+            }
+
+            // What's under the centre-of-screen reticle right now — lets the UI tell the user
+            // whether tapping here would land on something reliable before they actually tap.
+            val centerHit = bestHit(frame.hitTest(viewportWidth / 2f, viewportHeight / 2f))
+            reticle = when {
+                centerHit == null -> ReticleStatus.NONE
+                centerHit.trackable is com.google.ar.core.Plane -> ReticleStatus.PLANE
+                else -> ReticleStatus.FEATURE
             }
 
             val viewMatrix = FloatArray(16); val projMatrix = FloatArray(16)
@@ -392,8 +413,18 @@ internal class ArRenderer(
             val a = points[points.size - 2]; val b = points[points.size - 1]
             dist3(a, b)
         } else null
-        onFrameResult(points.toList(), lastDist, tracking)
+        onFrameResult(points.toList(), lastDist, tracking, reticle)
     }
+
+    // hitTest() mixes detected-plane hits, depth-sensor hits, and raw feature-point hits in one
+    // list. A feature point is just a noisy triangulated speck — picking one of those first is
+    // exactly what produces wild outliers (e.g. a real 10cm tap resolving to a feature point 2+
+    // metres away). Prefer the much more reliable Plane/DepthPoint hits, falling back to a
+    // feature point only if neither exists.
+    private fun bestHit(hits: List<com.google.ar.core.HitResult>): com.google.ar.core.HitResult? =
+        hits.firstOrNull { it.trackable is com.google.ar.core.Plane }
+            ?: hits.firstOrNull { it.trackable is com.google.ar.core.DepthPoint }
+            ?: hits.firstOrNull()
 
     private fun drawCameraBackground(frame: Frame) {
         frame.transformCoordinates2d(
