@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.sketchdxf.app.data.AppDatabase
 import com.sketchdxf.app.data.DownloadSaver
+import com.sketchdxf.app.data.ShapeKind
 import com.sketchdxf.app.data.SketchSource
 import com.sketchdxf.app.data.SketchWork
 import com.sketchdxf.app.dxf.PdfPageRenderer
@@ -67,10 +68,18 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
     var showPreview by remember { mutableStateOf(false) }
     var showJpgChoice by remember { mutableStateOf(false) }
     var jpgExporting by remember { mutableStateOf(false) }
+    // Pictures inserted as movable objects (Insert Picture), not the trace-over background — DXF
+    // is a vector format and never embeds these, so on their own they'd silently vanish from a
+    // Download/Share of just the .dxf. Bundled alongside it as separate files instead.
+    var insertedImagePaths by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(workId) {
         work = dao.work(workId)
         sources = dao.sourcesFor(workId)
+        insertedImagePaths = dao.shapesFor(workId)
+            .filter { it.kind == ShapeKind.IMAGE && it.label.isNotBlank() && File(it.label).exists() }
+            .map { it.label }
+            .distinct()
     }
 
     if (showPreview) {
@@ -79,11 +88,31 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
         }
     }
 
+    fun mimeForPath(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+        "jpg", "jpeg" -> "image/jpeg"; "png" -> "image/png"; "webp" -> "image/webp"
+        "dxf" -> "application/dxf"; else -> "*/*"
+    }
+
     fun share(path: String, mime: String) {
         val f = File(path); if (!f.exists()) return
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", f)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { context.startActivity(Intent.createChooser(intent, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+
+    /** Shares several files (e.g. the .dxf plus any inserted picture objects) as one multi-
+     *  attachment share action, falling back to the single-file path when there's just one. */
+    fun shareMultiple(paths: List<String>) {
+        val existing = paths.filter { File(it).exists() }
+        if (existing.isEmpty()) return
+        if (existing.size == 1) { share(existing[0], mimeForPath(existing[0])); return }
+        val uris = ArrayList(existing.map { FileProvider.getUriForFile(context, "${context.packageName}.provider", File(it)) })
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         runCatching { context.startActivity(Intent.createChooser(intent, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
@@ -196,8 +225,17 @@ fun DxfDetailScreen(workId: Long, onBack: () -> Unit, onEdit: () -> Unit) {
             Text("DXF file", style = MaterialTheme.typography.labelLarge)
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(File(w.dxfPath).name.ifBlank { "Not generated" }, modifier = Modifier.weight(1f), maxLines = 1)
-                IconButton(onClick = { download(w.dxfPath, "${w.name}.dxf", "application/dxf") }) { Icon(Icons.Filled.Download, "Download") }
-                IconButton(onClick = { share(w.dxfPath, "application/dxf") }) { Icon(Icons.Filled.Share, "Share") }
+                IconButton(onClick = {
+                    val msg = download(w.dxfPath, "${w.name}.dxf", "application/dxf")
+                    var savedImages = 0
+                    insertedImagePaths.forEachIndexed { i, p ->
+                        val name = "${w.name}_image_${i + 1}.${File(p).extension.ifBlank { "jpg" }}"
+                        if (download(p, name, mimeForPath(p)).startsWith("Saved")) savedImages++
+                    }
+                    val full = if (insertedImagePaths.isEmpty()) msg else "$msg (+$savedImages image(s))"
+                    android.widget.Toast.makeText(context, full, android.widget.Toast.LENGTH_SHORT).show()
+                }) { Icon(Icons.Filled.Download, "Download") }
+                IconButton(onClick = { shareMultiple(listOf(w.dxfPath) + insertedImagePaths) }) { Icon(Icons.Filled.Share, "Share") }
             }
 
             Text("Image (JPG)", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
